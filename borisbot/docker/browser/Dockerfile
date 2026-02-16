@@ -13,6 +13,7 @@ RUN apt-get update \
         fluxbox \
         novnc \
         pcmanfm \
+        websockify \
         x11vnc \
         xvfb \
     && mkdir -p /browser-profile \

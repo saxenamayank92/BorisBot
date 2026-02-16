@@ -9,21 +9,11 @@ log() {
 export DISPLAY=:99
 mkdir -p /browser-profile
 
-find_browser_bin() {
-  if command -v chromium >/dev/null 2>&1; then
-    printf 'chromium'
-    return 0
-  fi
-  if command -v chromium-browser >/dev/null 2>&1; then
-    printf 'chromium-browser'
-    return 0
-  fi
-  if command -v google-chrome >/dev/null 2>&1; then
-    printf 'google-chrome'
-    return 0
-  fi
-  return 1
-}
+CHROME_BIN="$(ls -d /ms-playwright/chromium-*/chrome-linux/chrome 2>/dev/null | head -n 1)"
+if [[ -z "${CHROME_BIN}" ]]; then
+  log "Playwright Chromium binary not found under /ms-playwright; exiting."
+  exit 1
+fi
 
 log "Starting Xvfb on ${DISPLAY}"
 Xvfb "${DISPLAY}" -screen 0 1280x800x24 &
@@ -31,22 +21,13 @@ Xvfb "${DISPLAY}" -screen 0 1280x800x24 &
 log "Starting fluxbox"
 fluxbox -display "${DISPLAY}" &
 
-if BROWSER_BIN="$(find_browser_bin)"; then
-  log "Starting ${BROWSER_BIN} with CDP on port ${CDP_PORT}"
-  "${BROWSER_BIN}" \
-    --no-sandbox \
-    --disable-dev-shm-usage \
-    --remote-debugging-address=0.0.0.0 \
-    --remote-debugging-port="${CDP_PORT}" \
-    --user-data-dir=/browser-profile \
-    --disable-gpu \
-    --no-first-run \
-    --no-default-browser-check \
-    --disable-background-networking \
-    about:blank >/tmp/chromium.log 2>&1 &
-else
-  log "No Chromium-compatible binary found on PATH; skipping CDP process startup."
-fi
+log "Starting Playwright Chromium with CDP on port 9222"
+"${CHROME_BIN}" \
+  --remote-debugging-port=9222 \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --user-data-dir=/browser-profile \
+  about:blank >/tmp/chromium.log 2>&1 &
 
 log "Starting x11vnc on port ${VNC_PORT}"
 x11vnc \
@@ -56,12 +37,7 @@ x11vnc \
   -rfbport "${VNC_PORT}" \
   -nopw >/tmp/x11vnc.log 2>&1 &
 
-NOVNC_PROXY="/usr/share/novnc/utils/novnc_proxy"
-if [[ ! -x "${NOVNC_PROXY}" ]]; then
-  log "noVNC proxy not found at ${NOVNC_PROXY}; exiting."
-  exit 1
-fi
-log "Starting noVNC proxy on port ${NOVNC_PORT}"
-"${NOVNC_PROXY}" --vnc "localhost:${VNC_PORT}" --listen "${NOVNC_PORT}" >/tmp/novnc.log 2>&1 &
+log "Starting noVNC via websockify on port 6080"
+websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/novnc.log 2>&1 &
 
 wait -n
