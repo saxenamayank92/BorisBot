@@ -3,6 +3,7 @@ import logging
 from .database import init_db
 from .models import AgentCreate, AgentResponse
 from .agent_manager import AgentManager
+from .browser_manager import BrowserManager
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +25,7 @@ async def startup_event():
     
     logger.info("Cleaning up orphans...")
     await AgentManager.cleanup_orphans()
+    await BrowserManager().cleanup_orphan_containers()
     
     # Start the agent monitoring loop
     import asyncio

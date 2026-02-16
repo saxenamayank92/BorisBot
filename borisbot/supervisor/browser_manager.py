@@ -107,6 +107,31 @@ class BrowserManager:
                 await asyncio.sleep(1)
         return False
 
+    async def _is_container_running(self, container_name: str) -> bool:
+        """Return True if Docker reports the container is currently running."""
+        result = await self._run_command(
+            ["docker", "inspect", "-f", "{{.State.Running}}", container_name]
+        )
+        if result.returncode != 0:
+            logger.info(
+                "Container inspect failed for %s (likely missing): %s",
+                container_name,
+                result.stderr.strip(),
+            )
+            return False
+        return result.stdout.strip().lower() == "true"
+
+    async def _is_tcp_port_open(self, host: str, port: int, timeout: int = 2) -> bool:
+        """Return True when a TCP connection can be established."""
+        def _probe() -> bool:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+
+        try:
+            return await asyncio.to_thread(_probe)
+        except OSError:
+            return False
+
     def _profile_path_for_agent(self, agent_id: str) -> Path:
         """Return the per-agent browser profile directory path."""
         base_dir = Path(user_data_dir("borisbot")) / "browser_profiles"
@@ -266,22 +291,150 @@ class BrowserManager:
         }
 
     async def stop_session(self, agent_id: str) -> None:
-        """Stop an active browser session for an agent.
+        """Stop an active browser session for an agent."""
+        logger.info("Stopping browser session for agent %s", agent_id)
+        now = datetime.utcnow().isoformat()
+        async for db in get_db():
+            async with db.execute(
+                """
+                SELECT id, container_name
+                FROM browser_sessions
+                WHERE agent_id = ? AND status = 'running'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (agent_id,),
+            ) as cursor:
+                session_row = await cursor.fetchone()
 
-        Docker/container stop behavior is intentionally deferred.
-        """
-        logger.info("Stop browser session requested for agent %s", agent_id)
+            if not session_row:
+                logger.info("No running browser session found for agent %s", agent_id)
+                return
+
+            container_name = session_row["container_name"]
+            stop_result = await self._run_command(["docker", "stop", container_name])
+            if stop_result.stdout:
+                logger.info("Docker stop stdout: %s", stop_result.stdout.strip())
+            if stop_result.stderr:
+                logger.info("Docker stop stderr: %s", stop_result.stderr.strip())
+            if stop_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to stop browser container {container_name}: {stop_result.stderr.strip()}"
+                )
+
+            await db.execute(
+                """
+                UPDATE browser_sessions
+                SET status = ?, last_health_check = ?
+                WHERE id = ?
+                """,
+                ("stopped", now, session_row["id"]),
+            )
+            await db.commit()
+            logger.info(
+                "Stopped browser session for agent %s (container=%s)",
+                agent_id,
+                container_name,
+            )
+            return
 
     async def cleanup_orphan_containers(self) -> None:
-        """Clean up orphaned browser containers from previous supervisor runs.
+        """Stop orphaned browser containers and reconcile stale DB state."""
+        logger.info("Cleaning up orphaned browser containers...")
+        now = datetime.utcnow().isoformat()
+        async for db in get_db():
+            async with db.execute(
+                """
+                SELECT id, container_name
+                FROM browser_sessions
+                WHERE status = 'running'
+                """
+            ) as cursor:
+                running_rows = await cursor.fetchall()
 
-        Actual container interaction is intentionally deferred.
-        """
-        logger.info("Cleanup of orphan browser containers requested (scaffold only).")
+            for row in running_rows:
+                session_id = row["id"]
+                container_name = row["container_name"]
+                is_running = await self._is_container_running(container_name)
+                if is_running:
+                    logger.info("Stopping orphaned browser container %s", container_name)
+                    stop_result = await self._run_command(["docker", "stop", container_name])
+                    if stop_result.stdout:
+                        logger.info("Docker stop stdout: %s", stop_result.stdout.strip())
+                    if stop_result.stderr:
+                        logger.info("Docker stop stderr: %s", stop_result.stderr.strip())
+                    if stop_result.returncode != 0:
+                        raise RuntimeError(
+                            "Failed to stop orphaned browser container "
+                            f"{container_name}: {stop_result.stderr.strip()}"
+                        )
+                    new_status = "stopped"
+                else:
+                    new_status = "crashed"
+
+                await db.execute(
+                    """
+                    UPDATE browser_sessions
+                    SET status = ?, last_health_check = ?
+                    WHERE id = ?
+                    """,
+                    (new_status, now, session_id),
+                )
+            await db.commit()
+        logger.info("Orphan browser container cleanup completed.")
 
     async def health_check_sessions(self) -> None:
-        """Run health checks for active browser sessions.
+        """Run one-shot health checks for running browser sessions."""
+        logger.info("Running browser session health checks...")
+        now = datetime.utcnow().isoformat()
+        async for db in get_db():
+            async with db.execute(
+                """
+                SELECT id, container_name, cdp_port
+                FROM browser_sessions
+                WHERE status = 'running'
+                """
+            ) as cursor:
+                running_rows = await cursor.fetchall()
 
-        Runtime health probing is intentionally deferred in this scaffold.
-        """
-        logger.info("Health check of browser sessions requested (scaffold only).")
+            for row in running_rows:
+                session_id = row["id"]
+                container_name = row["container_name"]
+                cdp_port = int(row["cdp_port"])
+                status = "running"
+
+                container_running = await self._is_container_running(container_name)
+                if not container_running:
+                    logger.warning(
+                        "Browser container is not running during health check: %s",
+                        container_name,
+                    )
+                    status = "crashed"
+                else:
+                    cdp_ready = await self._is_tcp_port_open("localhost", cdp_port, timeout=2)
+                    if not cdp_ready:
+                        logger.warning(
+                            "CDP port health check failed for container %s on port %s",
+                            container_name,
+                            cdp_port,
+                        )
+                        stop_result = await self._run_command(["docker", "stop", container_name])
+                        if stop_result.returncode != 0:
+                            logger.warning(
+                                "Failed to stop unhealthy browser container %s: %s",
+                                container_name,
+                                stop_result.stderr.strip(),
+                            )
+                        status = "crashed"
+
+                await db.execute(
+                    """
+                    UPDATE browser_sessions
+                    SET status = ?, last_health_check = ?
+                    WHERE id = ?
+                    """,
+                    (status, now, session_id),
+                )
+
+            await db.commit()
+        logger.info("Browser session health checks complete.")
