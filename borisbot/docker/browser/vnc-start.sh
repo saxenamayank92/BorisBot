@@ -24,6 +24,7 @@ fluxbox -display "${DISPLAY}" &
 log "Starting Playwright Chromium with CDP on port 9222"
 "${CHROME_BIN}" \
   --remote-debugging-port=9222 \
+  --remote-debugging-address=0.0.0.0 \
   --no-sandbox \
   --disable-dev-shm-usage \
   --user-data-dir=/browser-profile \
