@@ -28,6 +28,11 @@ log "Starting Playwright Chromium with CDP on port 9222"
   --no-sandbox \
   --disable-dev-shm-usage \
   --user-data-dir=/browser-profile \
+  --disable-gpu \
+  --disable-software-rasterizer \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-background-networking \
   about:blank >/tmp/chromium.log 2>&1 &
 
 log "Starting x11vnc on port ${VNC_PORT}"
