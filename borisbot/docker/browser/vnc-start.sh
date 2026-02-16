@@ -21,6 +21,7 @@ Xvfb "${DISPLAY}" -screen 0 1280x800x24 &
 log "Starting fluxbox"
 fluxbox -display "${DISPLAY}" &
 
+rm -rf /browser-profile/Singleton*
 log "Starting Playwright Chromium with CDP on port 9222"
 "${CHROME_BIN}" \
   --remote-debugging-port=9222 \
@@ -32,8 +33,7 @@ log "Starting Playwright Chromium with CDP on port 9222"
   --disable-software-rasterizer \
   --no-first-run \
   --no-default-browser-check \
-  --disable-background-networking \
-  about:blank >/tmp/chromium.log 2>&1 &
+  --disable-background-networking >/tmp/chromium.log 2>&1 &
 
 log "Starting x11vnc on port ${VNC_PORT}"
 x11vnc \
