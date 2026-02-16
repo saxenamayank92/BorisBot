@@ -1,0 +1,5 @@
+# Minimal Fluxbox config for BorisBot browser image scaffold.
+session.screen0.toolbar.visible:  false
+session.screen0.slit.autoHide:     true
+session.screen0.workspaces:        1
+session.menuFile:                  /etc/fluxbox/menu
