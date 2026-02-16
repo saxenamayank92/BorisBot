@@ -339,47 +339,53 @@ class BrowserManager:
             return
 
     async def cleanup_orphan_containers(self) -> None:
-        """Stop orphaned browser containers and reconcile stale DB state."""
+        """Apply strict startup reset by force-removing all browser containers."""
         logger.info("Cleaning up orphaned browser containers...")
         now = datetime.utcnow().isoformat()
-        async for db in get_db():
-            async with db.execute(
-                """
-                SELECT id, container_name
-                FROM browser_sessions
-                WHERE status = 'running'
-                """
-            ) as cursor:
-                running_rows = await cursor.fetchall()
+        list_result = await self._run_command(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                "name=borisbot_browser_",
+                "--format",
+                "{{.Names}}",
+            ]
+        )
+        if list_result.stdout:
+            logger.info("Docker container listing output:\n%s", list_result.stdout.strip())
+        if list_result.stderr:
+            logger.info("Docker container listing stderr: %s", list_result.stderr.strip())
+        if list_result.returncode != 0:
+            raise RuntimeError(
+                "Failed to list browser containers for cleanup: "
+                f"{list_result.stderr.strip()}"
+            )
 
-            for row in running_rows:
-                session_id = row["id"]
-                container_name = row["container_name"]
-                is_running = await self._is_container_running(container_name)
-                if is_running:
-                    logger.info("Stopping orphaned browser container %s", container_name)
-                    stop_result = await self._run_command(["docker", "stop", container_name])
-                    if stop_result.stdout:
-                        logger.info("Docker stop stdout: %s", stop_result.stdout.strip())
-                    if stop_result.stderr:
-                        logger.info("Docker stop stderr: %s", stop_result.stderr.strip())
-                    if stop_result.returncode != 0:
-                        raise RuntimeError(
-                            "Failed to stop orphaned browser container "
-                            f"{container_name}: {stop_result.stderr.strip()}"
-                        )
-                    new_status = "stopped"
-                else:
-                    new_status = "crashed"
-
-                await db.execute(
-                    """
-                    UPDATE browser_sessions
-                    SET status = ?, last_health_check = ?
-                    WHERE id = ?
-                    """,
-                    (new_status, now, session_id),
+        container_names = [line.strip() for line in list_result.stdout.splitlines() if line.strip()]
+        for container_name in container_names:
+            logger.info("Force removing browser container %s", container_name)
+            rm_result = await self._run_command(["docker", "rm", "-f", container_name])
+            if rm_result.stdout:
+                logger.info("Docker rm stdout: %s", rm_result.stdout.strip())
+            if rm_result.stderr:
+                logger.info("Docker rm stderr: %s", rm_result.stderr.strip())
+            if rm_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to force remove browser container {container_name}: "
+                    f"{rm_result.stderr.strip()}"
                 )
+
+        async for db in get_db():
+            await db.execute(
+                """
+                UPDATE browser_sessions
+                SET status = ?, last_health_check = ?
+                WHERE status = 'running'
+                """,
+                ("crashed", now),
+            )
             await db.commit()
         logger.info("Orphan browser container cleanup completed.")
 
