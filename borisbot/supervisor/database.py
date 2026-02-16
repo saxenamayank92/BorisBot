@@ -1,6 +1,13 @@
-import aiosqlite
-import os
+"""Database initialization and connection helpers for the supervisor."""
+
+import logging
 from pathlib import Path
+
+import aiosqlite
+
+from .migrations import run_migrations
+
+logger = logging.getLogger("borisbot.supervisor.database")
 
 DB_PATH = Path.home() / ".borisbot" / "borisbot.db"
 
@@ -9,9 +16,11 @@ async def get_db_path() -> Path:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return DB_PATH
 
+
 async def init_db():
     """Initialize the database with required tables."""
     db_path = await get_db_path()
+    logger.info("Initializing supervisor database at %s", db_path)
     async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agents (
@@ -34,7 +43,9 @@ async def init_db():
                 FOREIGN KEY(agent_id) REFERENCES agents(id)
             )
         """)
+        await run_migrations(db)
         await db.commit()
+
 
 async def get_db():
     """Dependency for getting a DB cursor."""
