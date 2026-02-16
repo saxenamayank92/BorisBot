@@ -15,6 +15,7 @@ RUN apt-get update \
         pcmanfm \
         x11vnc \
         xvfb \
+    && mkdir -p /browser-profile \
     && rm -rf /var/lib/apt/lists/*
 
 COPY vnc-start.sh /usr/local/bin/vnc-start.sh

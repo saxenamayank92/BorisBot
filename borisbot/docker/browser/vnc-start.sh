@@ -6,6 +6,9 @@ log() {
   printf '[browser-image] %s\n' "$*"
 }
 
+export DISPLAY=:99
+mkdir -p /browser-profile
+
 find_browser_bin() {
   if command -v chromium >/dev/null 2>&1; then
     printf 'chromium'
@@ -35,7 +38,7 @@ if BROWSER_BIN="$(find_browser_bin)"; then
     --disable-dev-shm-usage \
     --remote-debugging-address=0.0.0.0 \
     --remote-debugging-port="${CDP_PORT}" \
-    --user-data-dir=/tmp/chromium-profile \
+    --user-data-dir=/browser-profile \
     --disable-gpu \
     --no-first-run \
     --no-default-browser-check \
@@ -54,11 +57,11 @@ x11vnc \
   -nopw >/tmp/x11vnc.log 2>&1 &
 
 NOVNC_PROXY="/usr/share/novnc/utils/novnc_proxy"
-if [[ -x "${NOVNC_PROXY}" ]]; then
-  log "Starting noVNC proxy on port ${NOVNC_PORT}"
-  "${NOVNC_PROXY}" --vnc "localhost:${VNC_PORT}" --listen "${NOVNC_PORT}" >/tmp/novnc.log 2>&1 &
-else
-  log "noVNC proxy not found at ${NOVNC_PROXY}; skipping web client startup."
+if [[ ! -x "${NOVNC_PROXY}" ]]; then
+  log "noVNC proxy not found at ${NOVNC_PROXY}; exiting."
+  exit 1
 fi
+log "Starting noVNC proxy on port ${NOVNC_PORT}"
+"${NOVNC_PROXY}" --vnc "localhost:${VNC_PORT}" --listen "${NOVNC_PORT}" >/tmp/novnc.log 2>&1 &
 
 wait -n
