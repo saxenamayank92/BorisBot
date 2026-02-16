@@ -186,6 +186,17 @@ class BrowserManager:
             raise RuntimeError("Maximum browser sessions reached")
 
         container_name = f"borisbot_browser_{agent_id}"
+        preclean_result = await self._run_command(["docker", "rm", "-f", container_name])
+        if preclean_result.stdout:
+            logger.info("Docker pre-clean stdout: %s", preclean_result.stdout.strip())
+        if preclean_result.stderr:
+            logger.info("Docker pre-clean stderr: %s", preclean_result.stderr.strip())
+        if preclean_result.returncode != 0 and "No such container" not in preclean_result.stderr:
+            raise RuntimeError(
+                f"Failed pre-clean for browser container {container_name}: "
+                f"{preclean_result.stderr.strip()}"
+            )
+
         run_result = await self._run_command(
             [
                 "docker",
