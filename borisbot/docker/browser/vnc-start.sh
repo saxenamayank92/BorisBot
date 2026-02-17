@@ -21,32 +21,26 @@ Xvfb "${DISPLAY}" -screen 0 1280x800x24 &
 log "Starting fluxbox"
 fluxbox -display "${DISPLAY}" &
 
-echo "[browser-image] Ensuring clean Chrome lifecycle"
+echo "[browser-image] Starting Playwright Chromium with CDP in headless mode"
 
-# Kill any existing Chrome processes (defensive)
-pkill -f chrome || true
+mkdir -p /browser-profile/default
 
-# Remove Chrome profile lock files to prevent session reuse
-rm -rf /browser-profile/Singleton*
-rm -rf /browser-profile/DevToolsActivePort || true
-
-sleep 1
-
-echo "[browser-image] Starting Playwright Chromium with CDP on port 9222"
+rm -rf /browser-profile/default/Singleton*
+rm -rf /browser-profile/default/DevToolsActivePort || true
 
 "${CHROME_BIN}" \
   --remote-debugging-address=0.0.0.0 \
   --remote-debugging-port=9222 \
-  --remote-debugging-pipe=false \
-  --enable-automation \
+  --user-data-dir=/browser-profile/default \
   --no-sandbox \
   --disable-dev-shm-usage \
   --disable-gpu \
-  --disable-software-rasterizer \
+  --headless=new \
   --no-first-run \
   --no-default-browser-check \
   --disable-background-networking \
-  --user-data-dir=/browser-profile \
+  --disable-extensions \
+  --disable-features=Translate,BackForwardCache \
   > /tmp/chrome.log 2>&1 &
 
 log "Starting x11vnc on port ${VNC_PORT}"
