@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -30,6 +31,9 @@ class RecordingSession:
         if event_type == "navigate":
             url = str(payload.get("url", "")).strip()
             if not url:
+                return
+            parsed = urlparse(url)
+            if not parsed.hostname:
                 return
             if url == self._last_navigate_url:
                 return

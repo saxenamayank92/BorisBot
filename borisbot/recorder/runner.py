@@ -23,7 +23,11 @@ logger = logging.getLogger("borisbot.recorder.runner")
 INJECTOR_JS = Path(__file__).parent / "injector.js"
 
 
-async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict:
+async def run_record(
+    task_id: str,
+    start_url: str,
+    output_dir: Path = Path("workflows"),
+) -> dict:
     """Record a workflow and immediately replay it through TaskRunner."""
     session = RecordingSession(task_id=task_id)
     server = RecordingServer(session=session, port=7331)
@@ -65,7 +69,13 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
         await page.context.add_init_script(injector_code)
         await page.evaluate(injector_code)
 
+        await page.goto(start_url, wait_until="domcontentloaded")
+        session.ingest("navigate", {"url": page.url})
+
         print(f"\nRecording task: {task_id}")
+        if browser_session and browser_session.get("vnc_url"):
+            print(f"Open browser UI at: {browser_session['vnc_url']}")
+        print(f"Start URL: {start_url}")
         print("Perform actions in browser. Press Ctrl+C when finished.\n")
 
         stop_event = asyncio.Event()
@@ -82,20 +92,7 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
         await stop_event.wait()
 
         workflow = session.finalize()
-        current_url = page.url
-        commands = workflow.get("commands", [])
-        has_navigate = any(cmd.get("action") == "navigate" for cmd in commands)
-        if commands and not has_navigate and isinstance(current_url, str) and current_url.strip():
-            commands.insert(
-                0,
-                {
-                    "id": "0",
-                    "action": "navigate",
-                    "params": {"url": current_url},
-                },
-            )
-            for idx, cmd in enumerate(commands, start=1):
-                cmd["id"] = str(idx)
+
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{task_id}.json"
         output_path.write_text(json.dumps(workflow, indent=2), encoding="utf-8")

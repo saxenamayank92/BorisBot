@@ -163,9 +163,12 @@ def spawn(name: str):
 
 
 @app.command()
-def record(task_id: str):
+def record(
+    task_id: str,
+    start_url: str = typer.Option(..., "--start-url", help="Initial URL to open before recording"),
+):
     """Record workflow actions and replay immediately for validation."""
-    asyncio.run(run_record(task_id))
+    asyncio.run(run_record(task_id, start_url=start_url))
 
 def psutil_pid_exists(pid):
     """Check whether pid exists in the current process table."""
