@@ -1,4 +1,5 @@
 import asyncio
+import json
 import typer
 import uvicorn
 import subprocess
@@ -12,6 +13,13 @@ from typing import Optional
 from uuid import uuid4
 
 from borisbot.recorder.runner import run_record
+from borisbot.browser.actions import BrowserActions
+from borisbot.browser.command_router import CommandRouter
+from borisbot.browser.executor import BrowserExecutor
+from borisbot.browser.task_runner import TaskRunner
+from borisbot.supervisor.browser_manager import BrowserManager
+from borisbot.supervisor.capability_manager import CapabilityManager
+from borisbot.supervisor.database import get_db
 from borisbot.supervisor.worker import Worker
 
 app = typer.Typer()
@@ -169,6 +177,120 @@ def record(
 ):
     """Record workflow actions and replay immediately for validation."""
     asyncio.run(run_record(task_id, start_url=start_url))
+
+
+async def _run_replay(workflow_path: Path, from_step: int) -> dict:
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    if "task_id" not in workflow or "commands" not in workflow:
+        raise ValueError("Workflow must include 'task_id' and 'commands'")
+    if not isinstance(workflow["commands"], list):
+        raise ValueError("'commands' must be list")
+    if from_step < 1:
+        raise ValueError("--from-step must be >= 1")
+
+    replay_task_id = f"{workflow['task_id']}_replay_{uuid4().hex[:8]}"
+    replay_commands = workflow["commands"][from_step - 1 :]
+    replay_workflow = {"task_id": replay_task_id, "commands": replay_commands}
+
+    agent_id = f"replay_{workflow['task_id']}"
+    capabilities = await CapabilityManager.get_capabilities(agent_id) or []
+    has_browser_cap = any(row["capability_type"] == "BROWSER" for row in capabilities)
+    if not has_browser_cap:
+        await CapabilityManager.add_capability(agent_id, "BROWSER", "{}")
+
+    manager = BrowserManager()
+    executor: BrowserExecutor | None = None
+    try:
+        browser_session = await manager.request_session(agent_id)
+        executor = BrowserExecutor(browser_session["cdp_port"])
+        await executor.connect()
+        actions = BrowserActions(executor)
+        router = CommandRouter(actions)
+        runner = TaskRunner(router, agent_id=agent_id, pre_persisted=False, worker_id="direct")
+        return await runner.run(replay_workflow)
+    finally:
+        if executor is not None:
+            await executor.close()
+        try:
+            await manager.stop_session(agent_id)
+        except Exception:
+            pass
+
+
+async def _inspect_task(task_id: str) -> dict:
+    task_row = None
+    step_rows = []
+    event_rows = []
+    async for db in get_db():
+        cursor = await db.execute(
+            """
+            SELECT task_id, agent_id, status, created_at, updated_at, payload, result
+            FROM tasks
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        task_row = await cursor.fetchone()
+        if task_row is None:
+            return {"task_id": task_id, "status": "not_found"}
+
+        cursor = await db.execute(
+            """
+            SELECT command_id, status, duration_ms, error, started_at, finished_at, worker_id
+            FROM task_execution_logs
+            WHERE task_id = ?
+            ORDER BY created_at ASC
+            """,
+            (task_id,),
+        )
+        step_rows = [dict(row) for row in await cursor.fetchall()]
+
+        cursor = await db.execute(
+            """
+            SELECT event_type, payload, created_at
+            FROM task_events
+            WHERE task_id = ?
+            ORDER BY created_at ASC
+            """,
+            (task_id,),
+        )
+        event_rows = [dict(row) for row in await cursor.fetchall()]
+
+    return {
+        "task_id": task_row["task_id"],
+        "agent_id": task_row["agent_id"],
+        "status": task_row["status"],
+        "created_at": task_row["created_at"],
+        "updated_at": task_row["updated_at"],
+        "payload": json.loads(task_row["payload"]) if task_row["payload"] else None,
+        "result": json.loads(task_row["result"]) if task_row["result"] else None,
+        "step_logs": step_rows,
+        "events": [
+            {
+                "event_type": row["event_type"],
+                "payload": json.loads(row["payload"]) if row["payload"] else {},
+                "created_at": row["created_at"],
+            }
+            for row in event_rows
+        ],
+    }
+
+
+@app.command()
+def replay(
+    workflow_path: Path,
+    from_step: int = typer.Option(1, "--from-step", help="1-based command index to start replay from"),
+):
+    """Replay a workflow JSON through the deterministic runtime."""
+    result = asyncio.run(_run_replay(workflow_path, from_step))
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command()
+def inspect(task_id: str):
+    """Inspect persisted task result, step logs, and task events."""
+    details = asyncio.run(_inspect_task(task_id))
+    typer.echo(json.dumps(details, indent=2))
 
 def psutil_pid_exists(pid):
     """Check whether pid exists in the current process table."""
