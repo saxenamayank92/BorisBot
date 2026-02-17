@@ -1,3 +1,4 @@
+import asyncio
 import typer
 import uvicorn
 import subprocess
@@ -8,8 +9,14 @@ import httpx
 import socket
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
+
+from borisbot.recorder.runner import run_record
+from borisbot.supervisor.worker import Worker
 
 app = typer.Typer()
+worker_app = typer.Typer()
+app.add_typer(worker_app, name="worker")
 
 BORISBOT_DIR = Path.home() / ".borisbot"
 PID_FILE = BORISBOT_DIR / "supervisor.pid"
@@ -154,6 +161,12 @@ def spawn(name: str):
     except httpx.ConnectError:
         typer.echo("Supervisor is not running.")
 
+
+@app.command()
+def record(task_id: str):
+    """Record workflow actions and replay immediately for validation."""
+    asyncio.run(run_record(task_id))
+
 def psutil_pid_exists(pid):
     """Check whether pid exists in the current process table."""
     if sys.platform == "win32":
@@ -177,6 +190,12 @@ def psutil_pid_exists(pid):
         except OSError: 
             return False
         return True
+
+@worker_app.command("start")
+def worker_start():
+    """Start queue worker process."""
+    asyncio.run(Worker(str(uuid4())).run_forever())
+
 
 if __name__ == "__main__":
     app()
