@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import socket
 import subprocess
+import time
 import uuid
 
 from platformdirs import user_data_dir
@@ -25,6 +26,13 @@ NOVNC_CONTAINER_PORT = 6080
 
 class BrowserManager:
     """Coordinates browser session allocation and lifecycle for agents."""
+
+    _shared_expire_lock: asyncio.Lock | None = None
+
+    def __init__(self) -> None:
+        if BrowserManager._shared_expire_lock is None:
+            BrowserManager._shared_expire_lock = asyncio.Lock()
+        self._expire_lock = BrowserManager._shared_expire_lock
 
     def _repo_root(self) -> Path:
         """Resolve the repository root from this module location."""
@@ -335,44 +343,50 @@ class BrowserManager:
 
     async def expire_stale_sessions(self) -> None:
         """Expire running sessions whose TTL has elapsed."""
-        now = datetime.utcnow().isoformat()
-        async for db in get_db():
-            async with db.execute(
-                """
-                SELECT id, container_name
-                FROM browser_sessions
-                WHERE status = 'running'
-                  AND expires_at IS NOT NULL
-                  AND expires_at < ?
-                """,
-                (now,),
-            ) as cursor:
-                stale_rows = await cursor.fetchall()
-
-            for row in stale_rows:
-                container_name = row["container_name"]
-                logger.info("Expiring stale browser session container: %s", container_name)
-                stop_result = await self._run_command(["docker", "stop", container_name])
-                if stop_result.returncode != 0 and "No such container" not in stop_result.stderr:
-                    raise RuntimeError(
-                        f"Failed to stop stale container {container_name}: "
-                        f"{stop_result.stderr.strip()}"
-                    )
-                rm_result = await self._run_command(["docker", "rm", "-f", container_name])
-                if rm_result.returncode != 0 and "No such container" not in rm_result.stderr:
-                    raise RuntimeError(
-                        f"Failed to remove stale container {container_name}: "
-                        f"{rm_result.stderr.strip()}"
-                    )
-                await db.execute(
+        started = time.perf_counter()
+        async with self._expire_lock:
+            now = datetime.utcnow().isoformat()
+            async for db in get_db():
+                async with db.execute(
                     """
-                    UPDATE browser_sessions
-                    SET status = ?, last_health_check = ?
-                    WHERE id = ?
+                    SELECT id, container_name
+                    FROM browser_sessions
+                    WHERE status = 'running'
+                      AND expires_at IS NOT NULL
+                      AND expires_at < ?
                     """,
-                    ("expired", now, row["id"]),
-                )
-            await db.commit()
+                    (now,),
+                ) as cursor:
+                    stale_rows = await cursor.fetchall()
+
+                logger.info("Expiring %d stale browser sessions", len(stale_rows))
+
+                for row in stale_rows:
+                    container_name = row["container_name"]
+                    stop_result = await self._run_command(["docker", "stop", container_name])
+                    if stop_result.returncode != 0 and "No such container" not in stop_result.stderr:
+                        raise RuntimeError(
+                            f"Failed to stop stale container {container_name}: "
+                            f"{stop_result.stderr.strip()}"
+                        )
+                    rm_result = await self._run_command(["docker", "rm", "-f", container_name])
+                    if rm_result.returncode != 0 and "No such container" not in rm_result.stderr:
+                        raise RuntimeError(
+                            f"Failed to remove stale container {container_name}: "
+                            f"{rm_result.stderr.strip()}"
+                        )
+                    await db.execute(
+                        """
+                        UPDATE browser_sessions
+                        SET status = ?, last_health_check = ?
+                        WHERE id = ?
+                        """,
+                        ("expired", now, row["id"]),
+                    )
+                    logger.info("Expired browser container: %s", container_name)
+                await db.commit()
+        elapsed = time.perf_counter() - started
+        logger.info("expire_stale_sessions completed in %.3fs", elapsed)
 
     async def stop_session(self, agent_id: str) -> None:
         """Stop an active browser session for an agent."""

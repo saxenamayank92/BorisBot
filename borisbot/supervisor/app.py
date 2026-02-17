@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+import asyncio
 import logging
 from .database import init_db, reconcile_running_tasks_after_crash
 from .models import AgentCreate, AgentResponse
@@ -15,11 +16,26 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("borisbot.supervisor")
+ttl_logger = logging.getLogger("borisbot.supervisor.ttl_worker")
+
+TTL_INTERVAL_SECONDS = 30
+_ttl_task: asyncio.Task | None = None
 
 app = FastAPI(title="BorisBot Supervisor")
 
+
+async def _ttl_enforcement_loop():
+    manager = BrowserManager()
+    while True:
+        try:
+            await manager.expire_stale_sessions()
+        except Exception as e:
+            ttl_logger.error("TTL enforcement error: %s", e)
+        await asyncio.sleep(TTL_INTERVAL_SECONDS)
+
 @app.on_event("startup")
 async def startup_event():
+    global _ttl_task
     logger.info("Initializing database...")
     await init_db()
 
@@ -31,15 +47,24 @@ async def startup_event():
     browser_manager = BrowserManager()
     await browser_manager.cleanup_orphan_containers()
     await browser_manager.expire_stale_sessions()
+
+    _ttl_task = asyncio.create_task(_ttl_enforcement_loop())
     
     # Start the agent monitoring loop
-    import asyncio
     asyncio.create_task(AgentManager.monitor_agents())
     
     logger.info("Database initialized and monitoring started.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    global _ttl_task
+    if _ttl_task:
+        _ttl_task.cancel()
+        try:
+            await _ttl_task
+        except asyncio.CancelledError:
+            pass
+        _ttl_task = None
     logger.info("Shutting down agents...")
     await AgentManager.shutdown()
     logger.info("Agents stopped.")
