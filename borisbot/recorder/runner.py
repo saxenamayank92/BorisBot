@@ -7,6 +7,7 @@ import json
 import logging
 import signal
 from pathlib import Path
+from uuid import uuid4
 
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
@@ -45,7 +46,11 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
         page = executor._require_page()
 
         injector_code = INJECTOR_JS.read_text(encoding="utf-8")
-        injector_code = f"window.__BORIS_RECORD_PORT__ = 7331;\n{injector_code}"
+        injector_code = (
+            "window.__BORIS_RECORD_HOST__ = 'host.docker.internal';\n"
+            "window.__BORIS_RECORD_PORT__ = 7331;\n"
+            f"{injector_code}"
+        )
         await page.context.add_init_script(injector_code)
         await page.evaluate(injector_code)
 
@@ -74,10 +79,12 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
         print(f"Saved -> {output_path}\n")
 
         print("Replaying recorded workflow...\n")
+        replay_workflow = dict(workflow)
+        replay_workflow["task_id"] = f"{task_id}_replay_{uuid4().hex[:8]}"
         actions = BrowserActions(executor)
         router = CommandRouter(actions)
         runner = TaskRunner(router, agent_id=agent_id, pre_persisted=False, worker_id="direct")
-        result = await runner.run(workflow)
+        result = await runner.run(replay_workflow)
 
         print("Replay result:")
         print(json.dumps(result, indent=2))

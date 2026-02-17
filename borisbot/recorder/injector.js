@@ -2,8 +2,9 @@
   "use strict";
 
   try {
+    const RECORD_HOST = window.__BORIS_RECORD_HOST__ || "host.docker.internal";
     const RECORD_PORT = window.__BORIS_RECORD_PORT__ || 7331;
-    const ENDPOINT = `http://127.0.0.1:${RECORD_PORT}/event`;
+    const ENDPOINT = `http://${RECORD_HOST}:${RECORD_PORT}/event`;
     let lastNavigatedUrl = null;
     const pendingInputValues = new Map();
 
