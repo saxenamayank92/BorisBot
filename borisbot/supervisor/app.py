@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 import asyncio
 import logging
-from .database import init_db, reconcile_running_tasks_after_crash
+from .database import get_db, init_db
 from .models import AgentCreate, AgentResponse
 from .agent_manager import AgentManager
 from .browser_manager import BrowserManager
@@ -39,13 +39,22 @@ async def startup_event():
     logger.info("Initializing database...")
     await init_db()
 
-    logger.info("Reconciling stale running tasks...")
-    await reconcile_running_tasks_after_crash()
-    
     logger.info("Cleaning up orphans...")
     await AgentManager.cleanup_orphans()
     browser_manager = BrowserManager()
     await browser_manager.cleanup_orphan_containers()
+    async for db in get_db():
+        await db.execute("UPDATE tasks SET status = 'pending' WHERE status = 'running'")
+        await db.commit()
+    async for db in get_db():
+        await db.execute(
+            """
+            UPDATE task_queue
+            SET locked_at = NULL, locked_by = NULL, lock_expires_at = NULL
+            WHERE lock_expires_at IS NOT NULL
+            """
+        )
+        await db.commit()
     await browser_manager.expire_stale_sessions()
 
     _ttl_task = asyncio.create_task(_ttl_enforcement_loop())

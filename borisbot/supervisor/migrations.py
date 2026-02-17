@@ -23,7 +23,52 @@ MIGRATIONS: list[tuple[str, str]] = [
             last_health_check TEXT
         )
         """,
-    )
+    ),
+    (
+        "20260217_create_tasks",
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            result TEXT
+        )
+        """,
+    ),
+    (
+        "20260217_create_task_queue",
+        """
+        CREATE TABLE IF NOT EXISTS task_queue (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL,
+            locked_at TEXT,
+            locked_by TEXT,
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+        )
+        """,
+    ),
+    (
+        "20260217_create_task_queue_locked_index",
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_queue_locked ON task_queue(locked_at)
+        """,
+    ),
+    (
+        "20260217_add_task_queue_lock_expires_at",
+        """
+        ALTER TABLE task_queue ADD COLUMN lock_expires_at TEXT
+        """,
+    ),
+    (
+        "20260217_create_task_queue_lock_expires_index",
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_queue_lock_expires ON task_queue(lock_expires_at)
+        """,
+    ),
 ]
 
 
