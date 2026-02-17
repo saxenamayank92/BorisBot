@@ -353,6 +353,95 @@ def lint_workflow(
     """Lint a recorded workflow for CI gating using selector robustness thresholds."""
     _load_and_validate_workflow(workflow_path)
     report = analyze_workflow_file(workflow_path)
+    violations = _compute_lint_violations(report, min_average_score, max_fragile, max_high_risk)
+
+    output = {"status": "ok" if not violations else "failed", "summary": report.get("summary", {})}
+    if violations:
+        output["violations"] = violations
+    typer.echo(json.dumps(output, indent=2))
+    if violations:
+        raise typer.Exit(code=1)
+
+
+@app.command("release-check")
+def release_check(
+    workflow_paths: list[Path] = typer.Argument(..., help="Workflow JSON files to lint"),
+    min_average_score: float = typer.Option(70.0, "--min-average-score"),
+    max_fragile: int = typer.Option(5, "--max-fragile"),
+    max_high_risk: int = typer.Option(0, "--max-high-risk"),
+):
+    """Run full release gate: test suite + workflow lint checks."""
+    verify_result = _run_verify_suite()
+    if verify_result["stdout"]:
+        typer.echo(verify_result["stdout"].rstrip())
+    if verify_result["stderr"]:
+        typer.echo(verify_result["stderr"].rstrip(), err=True)
+    if verify_result["returncode"] != 0:
+        raise typer.Exit(code=verify_result["returncode"])
+
+    workflow_outputs = []
+    has_lint_failure = False
+    for workflow_path in workflow_paths:
+        _load_and_validate_workflow(workflow_path)
+        report = analyze_workflow_file(workflow_path)
+        violations = _compute_lint_violations(
+            report, min_average_score, max_fragile, max_high_risk
+        )
+        status = "ok" if not violations else "failed"
+        has_lint_failure = has_lint_failure or bool(violations)
+        item = {
+            "workflow_path": str(workflow_path),
+            "status": status,
+            "summary": report.get("summary", {}),
+        }
+        if violations:
+            item["violations"] = violations
+        workflow_outputs.append(item)
+
+    typer.echo(
+        json.dumps(
+            {
+                "verify_status": "ok",
+                "workflows": workflow_outputs,
+            },
+            indent=2,
+        )
+    )
+    if has_lint_failure:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def verify():
+    """Run deterministic reliability checks used as release gate."""
+    result = _run_verify_suite()
+    if result["stdout"]:
+        typer.echo(result["stdout"].rstrip())
+    if result["stderr"]:
+        typer.echo(result["stderr"].rstrip(), err=True)
+    if result["returncode"] != 0:
+        raise typer.Exit(code=result["returncode"])
+
+
+def _load_and_validate_workflow(workflow_path: Path) -> dict:
+    """Load a workflow JSON file and enforce supported schema contract."""
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    schema_version = workflow.get("schema_version", TASK_COMMAND_SCHEMA_V1)
+    if schema_version not in SUPPORTED_TASK_COMMAND_SCHEMAS:
+        raise ValueError(
+            f"Unsupported workflow schema_version '{schema_version}'. "
+            f"Supported: {sorted(SUPPORTED_TASK_COMMAND_SCHEMAS)}"
+        )
+    return workflow
+
+
+def _compute_lint_violations(
+    report: dict,
+    min_average_score: float,
+    max_fragile: int,
+    max_high_risk: int,
+) -> list[str]:
+    """Compute deterministic lint violations from analyzer report summary."""
     summary = report.get("summary", {})
     average_score = float(summary.get("average_score", 0))
     fragile = int(summary.get("fragile", 0))
@@ -367,38 +456,18 @@ def lint_workflow(
         violations.append(f"fragile {fragile} exceeds maximum {max_fragile}")
     if high_risk > max_high_risk:
         violations.append(f"high_risk {high_risk} exceeds maximum {max_high_risk}")
-
-    output = {"status": "ok" if not violations else "failed", "summary": summary}
-    if violations:
-        output["violations"] = violations
-    typer.echo(json.dumps(output, indent=2))
-    if violations:
-        raise typer.Exit(code=1)
+    return violations
 
 
-@app.command()
-def verify():
-    """Run deterministic reliability checks used as release gate."""
+def _run_verify_suite() -> dict:
+    """Run unittest discovery and return structured subprocess result."""
     cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        typer.echo(result.stdout.rstrip())
-    if result.stderr:
-        typer.echo(result.stderr.rstrip(), err=True)
-    if result.returncode != 0:
-        raise typer.Exit(code=result.returncode)
-
-
-def _load_and_validate_workflow(workflow_path: Path) -> dict:
-    """Load a workflow JSON file and enforce supported schema contract."""
-    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-    schema_version = workflow.get("schema_version", TASK_COMMAND_SCHEMA_V1)
-    if schema_version not in SUPPORTED_TASK_COMMAND_SCHEMAS:
-        raise ValueError(
-            f"Unsupported workflow schema_version '{schema_version}'. "
-            f"Supported: {sorted(SUPPORTED_TASK_COMMAND_SCHEMAS)}"
-        )
-    return workflow
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
 
 
 def psutil_pid_exists(pid):

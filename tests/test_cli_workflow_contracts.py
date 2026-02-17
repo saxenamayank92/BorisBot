@@ -10,6 +10,7 @@ import io
 import typer
 
 from borisbot.cli import _load_and_validate_workflow, lint_workflow
+from borisbot.cli import _compute_lint_violations
 
 
 class CliWorkflowContractTests(unittest.TestCase):
@@ -67,6 +68,22 @@ class CliWorkflowContractTests(unittest.TestCase):
                 lint_workflow(workflow_path, min_average_score=85.0, max_fragile=0, max_high_risk=0)
         except typer.Exit as exc:
             self.fail(f"lint_workflow unexpectedly exited: {exc.exit_code}")
+
+    def test_compute_lint_violations_thresholds(self) -> None:
+        report = {
+            "summary": {
+                "average_score": 60.0,
+                "fragile": 6,
+                "high_risk": 1,
+            }
+        }
+        violations = _compute_lint_violations(
+            report,
+            min_average_score=70.0,
+            max_fragile=5,
+            max_high_risk=0,
+        )
+        self.assertEqual(len(violations), 3)
 
 
 if __name__ == "__main__":
