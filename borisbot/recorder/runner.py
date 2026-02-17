@@ -44,6 +44,17 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
         executor = BrowserExecutor(browser_session["cdp_port"])
         await executor.connect()
         page = executor._require_page()
+        context = page.context
+
+        async def _record_event_binding(_source: object, event: dict) -> None:
+            if not isinstance(event, dict):
+                return
+            event_type = event.get("event_type")
+            payload = event.get("payload", {})
+            if isinstance(event_type, str):
+                session.ingest(event_type, payload if isinstance(payload, dict) else {})
+
+        await context.expose_binding("__BORIS_RECORD_EVENT__", _record_event_binding)
 
         injector_code = INJECTOR_JS.read_text(encoding="utf-8")
         injector_code = (

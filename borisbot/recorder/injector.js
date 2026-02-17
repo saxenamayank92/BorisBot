@@ -70,11 +70,19 @@
 
     const sendEvent = (eventType, payload) => {
       try {
-        const body = JSON.stringify({
+        const event = {
           event_type: eventType,
           payload: payload || {},
           created_at: new Date().toISOString(),
-        });
+        };
+        if (typeof window.__BORIS_RECORD_EVENT__ === "function") {
+          try {
+            window.__BORIS_RECORD_EVENT__(event);
+          } catch (_) {
+            // fallback to HTTP transport
+          }
+        }
+        const body = JSON.stringify(event);
         fetch(ENDPOINT, {
           method: "POST",
           mode: "no-cors",
