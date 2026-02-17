@@ -339,6 +339,20 @@ def inspect(task_id: str):
     details = asyncio.run(_inspect_task(task_id))
     typer.echo(json.dumps(details, indent=2))
 
+
+@app.command()
+def verify():
+    """Run deterministic reliability checks used as release gate."""
+    cmd = [sys.executable, "-m", "unittest", "-v", "tests/test_reliability_loops.py"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        typer.echo(result.stdout.rstrip())
+    if result.stderr:
+        typer.echo(result.stderr.rstrip(), err=True)
+    if result.returncode != 0:
+        raise typer.Exit(code=result.returncode)
+
+
 def psutil_pid_exists(pid):
     """Check whether pid exists in the current process table."""
     if sys.platform == "win32":
