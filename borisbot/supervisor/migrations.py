@@ -69,6 +69,39 @@ MIGRATIONS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_task_queue_lock_expires ON task_queue(lock_expires_at)
         """,
     ),
+    (
+        "20260217_create_task_execution_logs",
+        """
+        CREATE TABLE IF NOT EXISTS task_execution_logs (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            command_id TEXT,
+            worker_id TEXT,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            duration_ms INTEGER,
+            error TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "20260217_create_task_execution_logs_task_index",
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_execution_logs_task ON task_execution_logs(task_id)
+        """,
+    ),
+    (
+        "20260217_create_worker_heartbeats",
+        """
+        CREATE TABLE IF NOT EXISTS worker_heartbeats (
+            worker_id TEXT PRIMARY KEY,
+            last_seen TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 

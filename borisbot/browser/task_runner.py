@@ -4,7 +4,9 @@ from datetime import datetime
 import json
 import logging
 import sqlite3
+import time
 from typing import Any, Dict, List
+from uuid import uuid4
 
 from .command_router import CommandRouter
 from borisbot.supervisor.browser_capability_guard import BrowserCapabilityGuard
@@ -18,10 +20,17 @@ class TaskRunner:
     Deterministic sequential task executor.
     """
 
-    def __init__(self, router: CommandRouter, agent_id: str, pre_persisted: bool = False):
+    def __init__(
+        self,
+        router: CommandRouter,
+        agent_id: str,
+        pre_persisted: bool = False,
+        worker_id: str | None = None,
+    ):
         self._router = router
         self.agent_id = agent_id
         self.pre_persisted = pre_persisted
+        self.worker_id = worker_id or "direct"
 
     async def _insert_task(self, task_id: str, agent_id: str, task: Dict[str, Any]) -> None:
         """Persist initial task checkpoint before execution begins."""
@@ -69,6 +78,63 @@ class TaskRunner:
             )
             await db.commit()
 
+    async def _insert_step_log(
+        self,
+        task_id: str,
+        command_id: str,
+        started_at: str,
+    ) -> str | None:
+        """Insert per-command execution log row without breaking runtime on failure."""
+        log_id = str(uuid4())
+        try:
+            async for db in get_db():
+                await db.execute(
+                    """
+                    INSERT INTO task_execution_logs (
+                        id, task_id, command_id, worker_id, status, started_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        log_id,
+                        task_id,
+                        command_id,
+                        self.worker_id,
+                        "running",
+                        started_at,
+                        started_at,
+                    ),
+                )
+                await db.commit()
+            return log_id
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            logger.warning("Failed to insert step log for task %s command %s: %s", task_id, command_id, exc)
+            return None
+
+    async def _update_step_log(
+        self,
+        log_id: str | None,
+        status: str,
+        finished_at: str,
+        duration_ms: int,
+        error: str | None = None,
+    ) -> None:
+        """Finalize per-command execution log row without breaking runtime on failure."""
+        if not log_id:
+            return
+        try:
+            async for db in get_db():
+                await db.execute(
+                    """
+                    UPDATE task_execution_logs
+                    SET status = ?, finished_at = ?, duration_ms = ?, error = ?
+                    WHERE id = ?
+                    """,
+                    (status, finished_at, duration_ms, error, log_id),
+                )
+                await db.commit()
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            logger.warning("Failed to update step log %s: %s", log_id, exc)
+
     async def run(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a multi-command task.
@@ -111,11 +177,12 @@ class TaskRunner:
             row = await cursor.fetchone()
         if row and row["status"] != "pending":
             logger.info("Task %s already executed", task_id)
-            return {"task_id": task_id, "status": row["status"], "steps": []}
+            return {"task_id": task_id, "status": row["status"], "duration_ms": 0, "steps": []}
 
         if not self.pre_persisted:
             await self._insert_task(task_id, agent_id, task)
         await self._mark_task_running(task_id)
+        task_started_perf = time.perf_counter()
 
         final_status = "completed"
         report: Dict[str, Any]
@@ -127,9 +194,11 @@ class TaskRunner:
 
         if guard_error is not None:
             final_status = "rejected"
+            total_duration_ms = max(1, int((time.perf_counter() - task_started_perf) * 1000))
             report = {
                 "task_id": task["task_id"],
                 "status": "rejected",
+                "duration_ms": total_duration_ms,
                 "reason": str(guard_error),
                 "steps": [],
             }
@@ -137,9 +206,20 @@ class TaskRunner:
             results: List[Dict[str, Any]] = []
             for command in task["commands"]:
                 command_id = command.get("id", "unknown")
+                command_started_perf = time.perf_counter()
+                command_started_at = datetime.utcnow().isoformat()
+                log_id = await self._insert_step_log(task_id, command_id, command_started_at)
 
                 try:
                     result = await self._router.execute(command)
+                    command_finished_at = datetime.utcnow().isoformat()
+                    command_duration_ms = max(1, int((time.perf_counter() - command_started_perf) * 1000))
+                    await self._update_step_log(
+                        log_id=log_id,
+                        status="ok",
+                        finished_at=command_finished_at,
+                        duration_ms=command_duration_ms,
+                    )
 
                     step_record = {
                         "command_id": command_id,
@@ -153,6 +233,15 @@ class TaskRunner:
 
                 except Exception as e:
                     final_status = "failed"
+                    command_finished_at = datetime.utcnow().isoformat()
+                    command_duration_ms = max(1, int((time.perf_counter() - command_started_perf) * 1000))
+                    await self._update_step_log(
+                        log_id=log_id,
+                        status="failed",
+                        finished_at=command_finished_at,
+                        duration_ms=command_duration_ms,
+                        error=str(e),
+                    )
                     results.append(
                         {
                             "command_id": command_id,
@@ -162,9 +251,11 @@ class TaskRunner:
                     )
                     break
 
+            total_duration_ms = max(1, int((time.perf_counter() - task_started_perf) * 1000))
             report = {
                 "task_id": task["task_id"],
                 "status": final_status,
+                "duration_ms": total_duration_ms,
                 "steps": results,
             }
 

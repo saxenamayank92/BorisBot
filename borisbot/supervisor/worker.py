@@ -15,6 +15,7 @@ from borisbot.supervisor.database import get_db
 logger = logging.getLogger("borisbot.supervisor.worker")
 
 LOCK_TIMEOUT_SECONDS = 60
+HEARTBEAT_INTERVAL_SECONDS = 10
 
 
 class Worker:
@@ -25,15 +26,48 @@ class Worker:
 
     async def run_forever(self):
         """Continuously claim and execute queued tasks."""
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        try:
+            while True:
+                await self._reclaim_stale_tasks()
+                claimed = await self._claim_task()
+                if not claimed:
+                    await asyncio.sleep(1)
+                    continue
+                task_id = claimed["task_id"]
+                logger.info("Worker %s claimed task %s", self.worker_id, task_id)
+                await self._execute_task(task_id)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            await self._upsert_heartbeat("stopped")
+
+    async def _heartbeat_loop(self) -> None:
+        """Emit worker heartbeat at a fixed interval while alive."""
         while True:
-            await self._reclaim_stale_tasks()
-            claimed = await self._claim_task()
-            if not claimed:
-                await asyncio.sleep(1)
-                continue
-            task_id = claimed["task_id"]
-            logger.info("Worker %s claimed task %s", self.worker_id, task_id)
-            await self._execute_task(task_id)
+            await self._upsert_heartbeat("alive")
+            await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
+    async def _upsert_heartbeat(self, status: str) -> None:
+        """Upsert heartbeat row for this worker."""
+        now = datetime.utcnow().isoformat()
+        async for db in get_db():
+            await db.execute(
+                """
+                INSERT INTO worker_heartbeats (worker_id, last_seen, status)
+                VALUES (?, ?, ?)
+                ON CONFLICT(worker_id) DO UPDATE SET
+                    last_seen=excluded.last_seen,
+                    status=excluded.status
+                """,
+                (self.worker_id, now, status),
+            )
+            await db.commit()
 
     async def _claim_task(self) -> dict[str, str] | None:
         """Atomically claim one unlocked queue row."""
@@ -132,7 +166,12 @@ class Worker:
 
             actions = BrowserActions(executor)
             router_obj = CommandRouter(actions)
-            runner = TaskRunner(router_obj, agent_id=agent_id, pre_persisted=True)
+            runner = TaskRunner(
+                router_obj,
+                agent_id=agent_id,
+                pre_persisted=True,
+                worker_id=self.worker_id,
+            )
             await runner.run(task)
             logger.info("Worker %s finished execution for task %s", self.worker_id, task_id)
         finally:

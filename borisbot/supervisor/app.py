@@ -5,6 +5,7 @@ from .database import get_db, init_db
 from .models import AgentCreate, AgentResponse
 from .agent_manager import AgentManager
 from .browser_manager import BrowserManager
+from .api_metrics import router as metrics_router
 
 # Configure logging
 logging.basicConfig(
@@ -22,6 +23,7 @@ TTL_INTERVAL_SECONDS = 30
 _ttl_task: asyncio.Task | None = None
 
 app = FastAPI(title="BorisBot Supervisor")
+app.include_router(metrics_router)
 
 
 async def _ttl_enforcement_loop():
