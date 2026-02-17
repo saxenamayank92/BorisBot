@@ -13,6 +13,7 @@ RUN apt-get update \
         fluxbox \
         novnc \
         pcmanfm \
+        socat \
         websockify \
         x11vnc \
         xvfb \
