@@ -65,6 +65,28 @@ Example payload:
 }
 ```
 
+## Failure Taxonomy Contract
+
+- Version key: `error_schema_version`
+- Current version: `error.v1`
+- Required fields on failures:
+
+```json
+{
+  "error_schema_version": "error.v1",
+  "error_class": "navigation_validation|selector_not_found|selector_ambiguous|interaction_failed|timeout|capability_rejected|cost_rejected",
+  "error_code": "string",
+  "step_id": "string",
+  "url": "string",
+  "message": "string",
+  "fingerprint": "sha256 hex"
+}
+```
+
+Fingerprint input format:
+
+`sha256(error_class + "|" + error_code + "|" + step_id + "|" + selector_or_empty + "|" + url_or_empty)`
+
 ## Change Process
 
 1. Add new contract constant in `borisbot/contracts.py`.

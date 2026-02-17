@@ -199,6 +199,8 @@ class TaskRunnerPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(len(result["steps"]), 2)
         self.assertEqual(result["steps"][-1]["status"], "failed")
+        self.assertIn("failure", result["steps"][-1])
+        self.assertEqual(result["steps"][-1]["failure"]["step_id"], "2")
 
         row = await self._fetch_task_row("task_failed")
         self.assertIsNotNone(row)
@@ -220,6 +222,8 @@ class TaskRunnerPersistenceTests(unittest.IsolatedAsyncioTestCase):
         result = await runner.run(task)
         self.assertEqual(result["status"], "rejected")
         self.assertIn("missing capability: BROWSER", result["reason"])
+        self.assertIn("failure", result)
+        self.assertEqual(result["failure"]["error_class"], "capability_rejected")
 
         row = await self._fetch_task_row("task_rejected")
         self.assertIsNotNone(row)
@@ -233,4 +237,3 @@ class TaskRunnerPersistenceTests(unittest.IsolatedAsyncioTestCase):
             ),
             0,
         )
-

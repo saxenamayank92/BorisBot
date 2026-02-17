@@ -14,6 +14,7 @@ from typing import Optional
 from uuid import uuid4
 
 from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHEMA_V1
+from borisbot.failures import build_failure
 from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
 from borisbot.browser.actions import BrowserActions
@@ -396,17 +397,21 @@ def release_check(
         }
         if violations:
             item["violations"] = violations
+            item["failure"] = build_failure(
+                error_class="interaction_failed",
+                error_code="WORKFLOW_LINT_FAILED",
+                step_id="lint",
+                selector="",
+                url="",
+                message="; ".join(violations),
+            )
         workflow_outputs.append(item)
 
-    typer.echo(
-        json.dumps(
-            {
-                "verify_status": "ok",
-                "workflows": workflow_outputs,
-            },
-            indent=2,
-        )
-    )
+    release_output = {"verify_status": "ok", "workflows": workflow_outputs}
+    if has_lint_failure:
+        failed_items = [item for item in workflow_outputs if item.get("status") == "failed"]
+        release_output["failure"] = failed_items[0].get("failure") if failed_items else None
+    typer.echo(json.dumps(release_output, indent=2))
     if has_lint_failure:
         raise typer.Exit(code=1)
 

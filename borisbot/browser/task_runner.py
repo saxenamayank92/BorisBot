@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .command_router import CommandRouter
 from borisbot.contracts import TASK_EVENT_SCHEMA_V1, TASK_RESULT_SCHEMA_V1
+from borisbot.failures import classify_failure
 from borisbot.supervisor.browser_capability_guard import BrowserCapabilityGuard
 from borisbot.supervisor.database import get_db
 
@@ -228,12 +229,26 @@ class TaskRunner:
         if guard_error is not None:
             final_status = "rejected"
             total_duration_ms = max(1, int((time.perf_counter() - task_started_perf) * 1000))
+            first_url = ""
+            for command in task.get("commands", []):
+                params = command.get("params", {})
+                if isinstance(params, dict) and isinstance(params.get("url"), str):
+                    first_url = params.get("url", "")
+                    break
+            failure = classify_failure(
+                error=guard_error,
+                step_id="guard",
+                action="",
+                selector="",
+                url=first_url,
+            )
             report = {
                 "schema_version": TASK_RESULT_SCHEMA_V1,
                 "task_id": task["task_id"],
                 "status": "rejected",
                 "duration_ms": total_duration_ms,
                 "reason": str(guard_error),
+                "failure": failure,
                 "steps": [],
             }
         else:
@@ -281,6 +296,16 @@ class TaskRunner:
 
                 except Exception as e:
                     final_status = "failed"
+                    params = command.get("params", {}) if isinstance(command, dict) else {}
+                    selector = params.get("selector", "") if isinstance(params, dict) else ""
+                    url = params.get("url", "") if isinstance(params, dict) else ""
+                    failure = classify_failure(
+                        error=e,
+                        step_id=command_id,
+                        action=str(command.get("action", "")),
+                        selector=str(selector or ""),
+                        url=str(url or ""),
+                    )
                     command_finished_at = datetime.utcnow().isoformat()
                     command_duration_ms = max(1, int((time.perf_counter() - command_started_perf) * 1000))
                     await self._update_step_log(
@@ -298,6 +323,7 @@ class TaskRunner:
                             "status": "failed",
                             "duration_ms": command_duration_ms,
                             "error": str(e),
+                            "failure": failure,
                         },
                     )
                     results.append(
@@ -305,6 +331,7 @@ class TaskRunner:
                             "command_id": command_id,
                             "status": "failed",
                             "error": str(e),
+                            "failure": failure,
                         }
                     )
                     break
