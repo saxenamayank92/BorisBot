@@ -43,36 +43,46 @@
       return null;
     };
 
-    const toSelector = (element) => {
-      if (!element || !element.tagName) return "body";
+    const toSelectorCandidates = (element) => {
+      if (!element || !element.tagName) return ["body"];
 
       const attr = (name) => element.getAttribute(name);
       const tag = element.tagName.toLowerCase();
+      const candidates = [];
+      const seen = new Set();
+      const pushCandidate = (value) => {
+        if (!value || typeof value !== "string") return;
+        const trimmed = value.trim();
+        if (!trimmed || seen.has(trimmed)) return;
+        candidates.push(trimmed);
+        seen.add(trimmed);
+      };
 
       const dataTestId = attr("data-testid");
-      if (dataTestId) return `[data-testid="${CSS.escape(dataTestId)}"]`;
+      if (dataTestId) pushCandidate(`[data-testid="${CSS.escape(dataTestId)}"]`);
 
       const dataTest = attr("data-test");
-      if (dataTest) return `[data-test="${CSS.escape(dataTest)}"]`;
+      if (dataTest) pushCandidate(`[data-test="${CSS.escape(dataTest)}"]`);
 
       const dataQa = attr("data-qa");
-      if (dataQa) return `[data-qa="${CSS.escape(dataQa)}"]`;
+      if (dataQa) pushCandidate(`[data-qa="${CSS.escape(dataQa)}"]`);
 
-      if (isStableId(element.id)) return `#${CSS.escape(element.id)}`;
+      if (isStableId(element.id)) pushCandidate(`#${CSS.escape(element.id)}`);
 
       const ariaLabel = attr("aria-label");
-      if (ariaLabel) return `[aria-label="${CSS.escape(ariaLabel)}"]`;
+      if (ariaLabel) pushCandidate(`[aria-label="${CSS.escape(ariaLabel)}"]`);
 
       const name = attr("name");
-      if (name) return `[name="${CSS.escape(name)}"]`;
+      if (name) pushCandidate(`[name="${CSS.escape(name)}"]`);
 
       const role = attr("role");
-      if (role) return `[role="${CSS.escape(role)}"]`;
+      if (role) pushCandidate(`[role="${CSS.escape(role)}"]`);
 
       const cls = firstStableClass(element);
-      if (cls) return `${tag}.${CSS.escape(cls)}`;
+      if (cls) pushCandidate(`${tag}.${CSS.escape(cls)}`);
 
-      return tag;
+      pushCandidate(tag);
+      return candidates;
     };
 
     const sendEvent = (eventType, payload) => {
@@ -144,8 +154,12 @@
             ? event.target.closest("a,button,[role],input,textarea,select,[data-testid],[data-test],[data-qa],*[aria-label],*[name]")
             : null;
           if (!target) return;
-          const selector = toSelector(target);
-          sendEvent("click", { selector });
+          const candidates = toSelectorCandidates(target);
+          if (!Array.isArray(candidates) || candidates.length === 0) return;
+          sendEvent("click", {
+            selector: candidates[0],
+            fallback_selectors: candidates.slice(1),
+          });
         } catch (_) {
           // never crash page runtime
         }
@@ -161,8 +175,12 @@
           if (!target || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
             return;
           }
-          const selector = toSelector(target);
-          pendingInputValues.set(selector, target.value ?? "");
+          const candidates = toSelectorCandidates(target);
+          if (!Array.isArray(candidates) || candidates.length === 0) return;
+          pendingInputValues.set(candidates[0], {
+            value: target.value ?? "",
+            fallback_selectors: candidates.slice(1),
+          });
         } catch (_) {
           // never crash page runtime
         }
@@ -178,12 +196,18 @@
           if (!target || !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
             return;
           }
-          const selector = toSelector(target);
-          const value = pendingInputValues.has(selector)
-            ? pendingInputValues.get(selector)
-            : target.value ?? "";
+          const candidates = toSelectorCandidates(target);
+          if (!Array.isArray(candidates) || candidates.length === 0) return;
+          const selector = candidates[0];
+          const pending = pendingInputValues.get(selector);
+          const value = pending ? pending.value : target.value ?? "";
+          const fallbackSelectors = pending ? pending.fallback_selectors : candidates.slice(1);
           pendingInputValues.delete(selector);
-          sendEvent("type", { selector, text: value });
+          sendEvent("type", {
+            selector,
+            text: value,
+            fallback_selectors: fallbackSelectors,
+          });
         } catch (_) {
           // never crash page runtime
         }

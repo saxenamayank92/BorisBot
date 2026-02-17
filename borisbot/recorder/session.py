@@ -57,6 +57,18 @@ class RecordingSession:
     def ingest(self, event_type: str, payload: dict[str, Any] | None) -> None:
         """Ingest a normalized browser event and append deterministic command."""
         payload = payload or {}
+        fallback_selectors_raw = payload.get("fallback_selectors", [])
+        fallback_selectors: list[str] = []
+        if isinstance(fallback_selectors_raw, list):
+            seen: set[str] = set()
+            for value in fallback_selectors_raw:
+                if not isinstance(value, str):
+                    continue
+                candidate = value.strip()
+                if not candidate or candidate in seen:
+                    continue
+                fallback_selectors.append(candidate)
+                seen.add(candidate)
         if event_type == "navigate":
             url = str(payload.get("url", "")).strip()
             if not url:
@@ -76,7 +88,12 @@ class RecordingSession:
             selector = str(payload.get("selector", "")).strip()
             if not selector:
                 return
-            self._append("click", {"selector": selector})
+            params: dict[str, Any] = {"selector": selector}
+            if fallback_selectors:
+                params["fallback_selectors"] = [
+                    value for value in fallback_selectors if value != selector
+                ]
+            self._append("click", params)
             return
 
         if event_type == "type":
@@ -84,7 +101,12 @@ class RecordingSession:
             if not selector:
                 return
             text = str(payload.get("text", ""))
-            self._append("type", {"selector": selector, "text": text})
+            params = {"selector": selector, "text": text}
+            if fallback_selectors:
+                params["fallback_selectors"] = [
+                    value for value in fallback_selectors if value != selector
+                ]
+            self._append("type", params)
 
     def finalize(self) -> dict[str, Any]:
         """Return finalized workflow payload in TaskRunner-compatible schema."""

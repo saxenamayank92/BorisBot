@@ -8,6 +8,7 @@ import sys
 import time
 import httpx
 import socket
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -179,7 +180,44 @@ def record(
     asyncio.run(run_record(task_id, start_url=start_url))
 
 
-async def _run_replay(workflow_path: Path, from_step: int) -> dict:
+class _ReplayRouter:
+    """Replay router with optional explicit selector fallback attempts."""
+
+    def __init__(self, base_router: CommandRouter, allow_fallback: bool):
+        self._base_router = base_router
+        self._allow_fallback = allow_fallback
+
+    async def execute(self, command: dict) -> dict:
+        if not self._allow_fallback:
+            return await self._base_router.execute(command)
+
+        action = command.get("action")
+        params = command.get("params", {})
+        fallback_selectors = params.get("fallback_selectors", [])
+        if action not in {"click", "type", "get_text"} or not isinstance(fallback_selectors, list):
+            return await self._base_router.execute(command)
+
+        try:
+            return await self._base_router.execute(command)
+        except Exception:
+            primary_exc = None
+            for fallback_selector in fallback_selectors:
+                if not isinstance(fallback_selector, str) or not fallback_selector.strip():
+                    continue
+                fallback_command = deepcopy(command)
+                fallback_command.setdefault("params", {})
+                fallback_command["params"]["selector"] = fallback_selector.strip()
+                try:
+                    return await self._base_router.execute(fallback_command)
+                except Exception as exc:
+                    primary_exc = exc
+                    continue
+            if primary_exc is not None:
+                raise primary_exc
+            raise
+
+
+async def _run_replay_with_options(workflow_path: Path, from_step: int, allow_fallback: bool) -> dict:
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
     if "task_id" not in workflow or "commands" not in workflow:
         raise ValueError("Workflow must include 'task_id' and 'commands'")
@@ -205,7 +243,8 @@ async def _run_replay(workflow_path: Path, from_step: int) -> dict:
         executor = BrowserExecutor(browser_session["cdp_port"])
         await executor.connect()
         actions = BrowserActions(executor)
-        router = CommandRouter(actions)
+        base_router = CommandRouter(actions)
+        router = _ReplayRouter(base_router, allow_fallback=allow_fallback)
         runner = TaskRunner(router, agent_id=agent_id, pre_persisted=False, worker_id="direct")
         return await runner.run(replay_workflow)
     finally:
@@ -280,9 +319,10 @@ async def _inspect_task(task_id: str) -> dict:
 def replay(
     workflow_path: Path,
     from_step: int = typer.Option(1, "--from-step", help="1-based command index to start replay from"),
+    allow_fallback: bool = typer.Option(False, "--allow-fallback", help="Allow explicit selector fallback candidates during replay"),
 ):
     """Replay a workflow JSON through the deterministic runtime."""
-    result = asyncio.run(_run_replay(workflow_path, from_step))
+    result = asyncio.run(_run_replay_with_options(workflow_path, from_step, allow_fallback))
     typer.echo(json.dumps(result, indent=2))
 
 
