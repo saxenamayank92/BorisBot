@@ -1,9 +1,17 @@
 """Deterministic Playwright CDP execution layer for browser actions."""
 
+import asyncio
 import logging
 from typing import Optional
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Error as PlaywrightError,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 logger = logging.getLogger("borisbot.browser.executor")
 
@@ -26,22 +34,65 @@ class BrowserExecutor:
         cdp_url = f"http://localhost:{self.cdp_port}"
         logger.info("Connecting to browser CDP endpoint %s", cdp_url)
 
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+        max_retries = 3
+        last_error: Exception | None = None
 
-        contexts = self._browser.contexts
-        self._context = contexts[0] if contexts else await self._browser.new_context()
+        for attempt in range(1, max_retries + 1):
+            try:
+                if self._playwright is None:
+                    self._playwright = await async_playwright().start()
 
-        pages = self._context.pages
-        self._page = pages[0] if pages else await self._context.new_page()
+                self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
 
-        logger.info("Connected to CDP and ready with active page")
+                contexts = self._browser.contexts
+                self._context = contexts[0] if contexts else await self._browser.new_context()
+
+                pages = self._context.pages
+                self._page = pages[0] if pages else await self._context.new_page()
+
+                logger.info("Connected to CDP and ready with active page")
+                return
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                is_retryable = isinstance(exc, PlaywrightError) or (
+                    "econnreset" in message or "connection refused" in message
+                )
+                if not is_retryable or attempt == max_retries:
+                    break
+                await asyncio.sleep(1)
+
+        raise RuntimeError("Failed to connect to browser CDP endpoint after 3 retries") from last_error
 
     def _require_page(self) -> Page:
         """Return current page or fail if connect() has not been called."""
         if self._page is None:
             raise RuntimeError("BrowserExecutor is not connected. Call connect() first.")
+        if self._page.is_closed():
+            raise RuntimeError("Page is closed. Call reset_page()")
         return self._page
+
+    async def is_healthy(self) -> bool:
+        """Return True if browser/page connection is currently healthy."""
+        if self._browser is None:
+            return False
+        if self._page is None:
+            return False
+        if self._page.is_closed():
+            return False
+        try:
+            await self._page.evaluate("1+1")
+            return True
+        except Exception:
+            return False
+
+    async def reset_page(self) -> None:
+        """Close current page and recreate one in the same context."""
+        if self._context is None:
+            raise RuntimeError("BrowserExecutor has no context. Call connect() first.")
+        if self._page is not None and not self._page.is_closed():
+            await self._page.close()
+        self._page = await self._context.new_page()
 
     async def navigate(self, url: str) -> None:
         """Navigate to URL with a hard 30-second timeout."""
