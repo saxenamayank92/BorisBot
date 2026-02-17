@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHEMA_V1
 from borisbot.recorder.runner import run_record
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
@@ -219,6 +220,12 @@ class _ReplayRouter:
 
 async def _run_replay_with_options(workflow_path: Path, from_step: int, allow_fallback: bool) -> dict:
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    schema_version = workflow.get("schema_version", TASK_COMMAND_SCHEMA_V1)
+    if schema_version not in SUPPORTED_TASK_COMMAND_SCHEMAS:
+        raise ValueError(
+            f"Unsupported workflow schema_version '{schema_version}'. "
+            f"Supported: {sorted(SUPPORTED_TASK_COMMAND_SCHEMAS)}"
+        )
     if "task_id" not in workflow or "commands" not in workflow:
         raise ValueError("Workflow must include 'task_id' and 'commands'")
     if not isinstance(workflow["commands"], list):

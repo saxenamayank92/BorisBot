@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from borisbot.contracts import TASK_COMMAND_SCHEMA_V1
+
 
 @dataclass
 class RecordingSession:
@@ -111,6 +113,7 @@ class RecordingSession:
     def finalize(self) -> dict[str, Any]:
         """Return finalized workflow payload in TaskRunner-compatible schema."""
         return {
+            "schema_version": TASK_COMMAND_SCHEMA_V1,
             "task_id": self.task_id,
             "commands": list(self.commands),
         }

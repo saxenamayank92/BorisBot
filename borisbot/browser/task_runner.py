@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from uuid import uuid4
 
 from .command_router import CommandRouter
+from borisbot.contracts import TASK_EVENT_SCHEMA_V1, TASK_RESULT_SCHEMA_V1
 from borisbot.supervisor.browser_capability_guard import BrowserCapabilityGuard
 from borisbot.supervisor.database import get_db
 
@@ -135,6 +136,31 @@ class TaskRunner:
         except Exception as exc:  # pragma: no cover - defensive logging path
             logger.warning("Failed to update step log %s: %s", log_id, exc)
 
+    async def _insert_task_event(
+        self,
+        task_id: str,
+        event_type: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> None:
+        """Insert task event row without interrupting runtime on failure."""
+        try:
+            now = datetime.utcnow().isoformat()
+            event_id = str(uuid4())
+            payload_data = dict(payload or {})
+            payload_data.setdefault("schema_version", TASK_EVENT_SCHEMA_V1)
+            event_payload = json.dumps(payload_data)
+            async for db in get_db():
+                await db.execute(
+                    """
+                    INSERT INTO task_events (id, task_id, event_type, payload, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (event_id, task_id, event_type, event_payload, now),
+                )
+                await db.commit()
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            logger.warning("Event logging failed: %s", exc)
+
     async def run(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a multi-command task.
@@ -177,11 +203,18 @@ class TaskRunner:
             row = await cursor.fetchone()
         if row and row["status"] != "pending":
             logger.info("Task %s already executed", task_id)
-            return {"task_id": task_id, "status": row["status"], "duration_ms": 0, "steps": []}
+            return {
+                "schema_version": TASK_RESULT_SCHEMA_V1,
+                "task_id": task_id,
+                "status": row["status"],
+                "duration_ms": 0,
+                "steps": [],
+            }
 
         if not self.pre_persisted:
             await self._insert_task(task_id, agent_id, task)
         await self._mark_task_running(task_id)
+        await self._insert_task_event(task_id, "task_started", {"task_id": task_id})
         task_started_perf = time.perf_counter()
 
         final_status = "completed"
@@ -196,6 +229,7 @@ class TaskRunner:
             final_status = "rejected"
             total_duration_ms = max(1, int((time.perf_counter() - task_started_perf) * 1000))
             report = {
+                "schema_version": TASK_RESULT_SCHEMA_V1,
                 "task_id": task["task_id"],
                 "status": "rejected",
                 "duration_ms": total_duration_ms,
@@ -209,6 +243,11 @@ class TaskRunner:
                 command_started_perf = time.perf_counter()
                 command_started_at = datetime.utcnow().isoformat()
                 log_id = await self._insert_step_log(task_id, command_id, command_started_at)
+                await self._insert_task_event(
+                    task_id,
+                    "step_started",
+                    {"command_id": command_id},
+                )
 
                 try:
                     result = await self._router.execute(command)
@@ -219,6 +258,15 @@ class TaskRunner:
                         status="ok",
                         finished_at=command_finished_at,
                         duration_ms=command_duration_ms,
+                    )
+                    await self._insert_task_event(
+                        task_id,
+                        "step_finished",
+                        {
+                            "command_id": command_id,
+                            "status": "ok",
+                            "duration_ms": command_duration_ms,
+                        },
                     )
 
                     step_record = {
@@ -242,6 +290,16 @@ class TaskRunner:
                         duration_ms=command_duration_ms,
                         error=str(e),
                     )
+                    await self._insert_task_event(
+                        task_id,
+                        "step_finished",
+                        {
+                            "command_id": command_id,
+                            "status": "failed",
+                            "duration_ms": command_duration_ms,
+                            "error": str(e),
+                        },
+                    )
                     results.append(
                         {
                             "command_id": command_id,
@@ -253,6 +311,7 @@ class TaskRunner:
 
             total_duration_ms = max(1, int((time.perf_counter() - task_started_perf) * 1000))
             report = {
+                "schema_version": TASK_RESULT_SCHEMA_V1,
                 "task_id": task["task_id"],
                 "status": final_status,
                 "duration_ms": total_duration_ms,
@@ -260,4 +319,13 @@ class TaskRunner:
             }
 
         await self._finalize_task(task_id, final_status, report)
+        await self._insert_task_event(
+            task_id,
+            "task_completed" if final_status == "completed" else "task_failed",
+            {
+                "task_id": task_id,
+                "status": final_status,
+                "duration_ms": report.get("duration_ms", 0),
+            },
+        )
         return report
