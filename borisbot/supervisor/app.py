@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 import logging
-from .database import init_db
+from .database import init_db, reconcile_running_tasks_after_crash
 from .models import AgentCreate, AgentResponse
 from .agent_manager import AgentManager
 from .browser_manager import BrowserManager
@@ -22,10 +22,15 @@ app = FastAPI(title="BorisBot Supervisor")
 async def startup_event():
     logger.info("Initializing database...")
     await init_db()
+
+    logger.info("Reconciling stale running tasks...")
+    await reconcile_running_tasks_after_crash()
     
     logger.info("Cleaning up orphans...")
     await AgentManager.cleanup_orphans()
-    await BrowserManager().cleanup_orphan_containers()
+    browser_manager = BrowserManager()
+    await browser_manager.cleanup_orphan_containers()
+    await browser_manager.expire_stale_sessions()
     
     # Start the agent monitoring loop
     import asyncio

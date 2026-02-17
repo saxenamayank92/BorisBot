@@ -1,7 +1,7 @@
 """Browser session lifecycle scaffolding for supervisor-managed agents."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import logging
 from pathlib import Path
@@ -16,6 +16,7 @@ from .database import get_db
 logger = logging.getLogger("borisbot.supervisor.browser_manager")
 
 MAX_BROWSER_SESSIONS = 3
+SESSION_TTL_MINUTES = 15
 IMAGE_NAME = "borisbot-browser"
 CDP_CONTAINER_PORT = 9222
 VNC_CONTAINER_PORT = 5900
@@ -181,11 +182,31 @@ class BrowserManager:
                     f"Docker build failed for image '{IMAGE_NAME}': {build_result.stderr.strip()}"
                 )
 
+        await self.expire_stale_sessions()
+
         running_sessions = await self._count_running_sessions()
         if running_sessions >= MAX_BROWSER_SESSIONS:
             raise RuntimeError("Maximum browser sessions reached")
 
-        container_name = f"borisbot_browser_{agent_id}"
+        async for db in get_db():
+            async with db.execute(
+                """
+                SELECT id FROM browser_sessions
+                WHERE agent_id = ? AND status = 'expired'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (agent_id,),
+            ) as cursor:
+                expired_row = await cursor.fetchone()
+                if expired_row:
+                    logger.info(
+                        "Found expired browser session for agent %s; creating fresh session.",
+                        agent_id,
+                    )
+            break
+
+        container_name = f"borisbot_browser_{agent_id}_{uuid.uuid4().hex[:8]}"
         preclean_result = await self._run_command(["docker", "rm", "-f", container_name])
         if preclean_result.stdout:
             logger.info("Docker pre-clean stdout: %s", preclean_result.stdout.strip())
@@ -258,7 +279,9 @@ class BrowserManager:
                 )
             raise RuntimeError("Timed out waiting for CDP port readiness")
 
-        now = datetime.utcnow().isoformat()
+        now_dt = datetime.utcnow()
+        now = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(minutes=SESSION_TTL_MINUTES)).isoformat()
         session_id = str(uuid.uuid4())
         async for db in get_db():
             await db.execute(
@@ -273,8 +296,9 @@ class BrowserManager:
                     status,
                     dockerfile_hash,
                     created_at,
-                    last_health_check
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_health_check,
+                    expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -287,6 +311,7 @@ class BrowserManager:
                     dockerfile_hash,
                     now,
                     now,
+                    expires_at,
                 ),
             )
             await db.commit()
@@ -307,6 +332,47 @@ class BrowserManager:
             "novnc_port": novnc_host_port,
             "vnc_url": f"http://localhost:{novnc_host_port}",
         }
+
+    async def expire_stale_sessions(self) -> None:
+        """Expire running sessions whose TTL has elapsed."""
+        now = datetime.utcnow().isoformat()
+        async for db in get_db():
+            async with db.execute(
+                """
+                SELECT id, container_name
+                FROM browser_sessions
+                WHERE status = 'running'
+                  AND expires_at IS NOT NULL
+                  AND expires_at < ?
+                """,
+                (now,),
+            ) as cursor:
+                stale_rows = await cursor.fetchall()
+
+            for row in stale_rows:
+                container_name = row["container_name"]
+                logger.info("Expiring stale browser session container: %s", container_name)
+                stop_result = await self._run_command(["docker", "stop", container_name])
+                if stop_result.returncode != 0 and "No such container" not in stop_result.stderr:
+                    raise RuntimeError(
+                        f"Failed to stop stale container {container_name}: "
+                        f"{stop_result.stderr.strip()}"
+                    )
+                rm_result = await self._run_command(["docker", "rm", "-f", container_name])
+                if rm_result.returncode != 0 and "No such container" not in rm_result.stderr:
+                    raise RuntimeError(
+                        f"Failed to remove stale container {container_name}: "
+                        f"{rm_result.stderr.strip()}"
+                    )
+                await db.execute(
+                    """
+                    UPDATE browser_sessions
+                    SET status = ?, last_health_check = ?
+                    WHERE id = ?
+                    """,
+                    ("expired", now, row["id"]),
+                )
+            await db.commit()
 
     async def stop_session(self, agent_id: str) -> None:
         """Stop an active browser session for an agent."""
