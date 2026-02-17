@@ -29,8 +29,6 @@ rm -rf /browser-profile/default/Singleton*
 rm -rf /browser-profile/default/DevToolsActivePort || true
 
 "${CHROME_BIN}" \
-  --headless=chrome \
-  --no-startup-window \
   --remote-debugging-address=0.0.0.0 \
   --remote-debugging-host=0.0.0.0 \
   --remote-debugging-port=9222 \
@@ -43,6 +41,7 @@ rm -rf /browser-profile/default/DevToolsActivePort || true
   --no-first-run \
   --no-default-browser-check \
   --disable-background-networking \
+  about:blank \
   > /tmp/chrome.log 2>&1 &
 
 CONTAINER_IP="$(hostname -i | awk '{print $1}')"
