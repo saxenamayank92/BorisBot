@@ -206,7 +206,12 @@ class BrowserManager:
                 container_name,
                 "-v",
                 f"{profile_path}:/browser-profile",
-                "-P",
+                "-p",
+                "127.0.0.1::9222",
+                "-p",
+                "127.0.0.1::5900",
+                "-p",
+                "127.0.0.1::6080",
                 IMAGE_NAME,
             ]
         )
