@@ -220,13 +220,7 @@ class _ReplayRouter:
 
 
 async def _run_replay_with_options(workflow_path: Path, from_step: int, allow_fallback: bool) -> dict:
-    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-    schema_version = workflow.get("schema_version", TASK_COMMAND_SCHEMA_V1)
-    if schema_version not in SUPPORTED_TASK_COMMAND_SCHEMAS:
-        raise ValueError(
-            f"Unsupported workflow schema_version '{schema_version}'. "
-            f"Supported: {sorted(SUPPORTED_TASK_COMMAND_SCHEMAS)}"
-        )
+    workflow = _load_and_validate_workflow(workflow_path)
     if "task_id" not in workflow or "commands" not in workflow:
         raise ValueError("Workflow must include 'task_id' and 'commands'")
     if not isinstance(workflow["commands"], list):
@@ -344,8 +338,42 @@ def inspect(task_id: str):
 @app.command("analyze-workflow")
 def analyze_workflow(workflow_path: Path):
     """Score selector robustness from a recorded workflow (no browser execution)."""
+    _load_and_validate_workflow(workflow_path)
     report = analyze_workflow_file(workflow_path)
     typer.echo(json.dumps(report, indent=2))
+
+
+@app.command("lint-workflow")
+def lint_workflow(
+    workflow_path: Path,
+    min_average_score: float = typer.Option(70.0, "--min-average-score"),
+    max_fragile: int = typer.Option(5, "--max-fragile"),
+    max_high_risk: int = typer.Option(0, "--max-high-risk"),
+):
+    """Lint a recorded workflow for CI gating using selector robustness thresholds."""
+    _load_and_validate_workflow(workflow_path)
+    report = analyze_workflow_file(workflow_path)
+    summary = report.get("summary", {})
+    average_score = float(summary.get("average_score", 0))
+    fragile = int(summary.get("fragile", 0))
+    high_risk = int(summary.get("high_risk", 0))
+
+    violations: list[str] = []
+    if average_score < min_average_score:
+        violations.append(
+            f"average_score {average_score} below minimum {min_average_score}"
+        )
+    if fragile > max_fragile:
+        violations.append(f"fragile {fragile} exceeds maximum {max_fragile}")
+    if high_risk > max_high_risk:
+        violations.append(f"high_risk {high_risk} exceeds maximum {max_high_risk}")
+
+    output = {"status": "ok" if not violations else "failed", "summary": summary}
+    if violations:
+        output["violations"] = violations
+    typer.echo(json.dumps(output, indent=2))
+    if violations:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -359,6 +387,18 @@ def verify():
         typer.echo(result.stderr.rstrip(), err=True)
     if result.returncode != 0:
         raise typer.Exit(code=result.returncode)
+
+
+def _load_and_validate_workflow(workflow_path: Path) -> dict:
+    """Load a workflow JSON file and enforce supported schema contract."""
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    schema_version = workflow.get("schema_version", TASK_COMMAND_SCHEMA_V1)
+    if schema_version not in SUPPORTED_TASK_COMMAND_SCHEMAS:
+        raise ValueError(
+            f"Unsupported workflow schema_version '{schema_version}'. "
+            f"Supported: {sorted(SUPPORTED_TASK_COMMAND_SCHEMAS)}"
+        )
+    return workflow
 
 
 def psutil_pid_exists(pid):
