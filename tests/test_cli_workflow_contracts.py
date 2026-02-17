@@ -108,12 +108,40 @@ class CliWorkflowContractTests(unittest.TestCase):
                         min_average_score=90.0,
                         max_fragile=0,
                         max_high_risk=0,
+                        json_output=True,
                     )
             self.assertEqual(cm.exception.exit_code, 1)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["workflows"][0]["status"], "failed")
             self.assertIn("failure", payload["workflows"][0])
             self.assertEqual(payload["workflows"][0]["failure"]["error_schema_version"], "error.v1")
+
+    def test_release_check_human_output_compact(self) -> None:
+        workflow_path = self._write_workflow(
+            {
+                "schema_version": "task_command.v1",
+                "task_id": "wf_human",
+                "commands": [
+                    {"id": "1", "action": "click", "params": {"selector": "button"}},
+                ],
+            }
+        )
+        with mock.patch(
+            "borisbot.cli._run_verify_suite",
+            return_value={"returncode": 0, "stdout": "Ran 17 tests\n\nOK\n", "stderr": ""},
+        ):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit):
+                with redirect_stdout(output):
+                    release_check(
+                        [workflow_path],
+                        min_average_score=90.0,
+                        max_fragile=0,
+                        max_high_risk=0,
+                    )
+            text = output.getvalue()
+            self.assertIn("RELEASE CHECK: FAIL", text)
+            self.assertIn("Workflow:", text)
 
 
 if __name__ == "__main__":

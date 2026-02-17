@@ -2,7 +2,7 @@
 
 import unittest
 
-from borisbot.failures import build_failure, classify_failure
+from borisbot.failures import build_failure, classify_failure, normalize_url_for_fingerprint
 
 
 class FailureTaxonomyTests(unittest.TestCase):
@@ -27,6 +27,37 @@ class FailureTaxonomyTests(unittest.TestCase):
         )
         self.assertEqual(first["fingerprint"], second["fingerprint"])
         self.assertEqual(first["error_schema_version"], "error.v1")
+
+    def test_url_normalization_stabilizes_fingerprint(self) -> None:
+        first = build_failure(
+            error_class="timeout",
+            error_code="TIMEOUT_OPERATION",
+            step_id="2",
+            url="https://www.linkedin.com/feed/?trk=abc#top",
+            message="timed out",
+            selector="#submit",
+        )
+        second = build_failure(
+            error_class="timeout",
+            error_code="TIMEOUT_OPERATION",
+            step_id="2",
+            url="http://www.linkedin.com/feed",
+            message="timed out",
+            selector="#submit",
+        )
+        self.assertEqual(first["url"], "www.linkedin.com/feed")
+        self.assertEqual(second["url"], "www.linkedin.com/feed")
+        self.assertEqual(first["fingerprint"], second["fingerprint"])
+
+    def test_normalize_url_rules(self) -> None:
+        self.assertEqual(
+            normalize_url_for_fingerprint("https://www.linkedin.com/feed/?trk=xyz#top"),
+            "www.linkedin.com/feed",
+        )
+        self.assertEqual(
+            normalize_url_for_fingerprint("https://example.com/"),
+            "example.com",
+        )
 
     def test_classifies_capability_rejection(self) -> None:
         failure = classify_failure(

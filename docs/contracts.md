@@ -87,6 +87,15 @@ Fingerprint input format:
 
 `sha256(error_class + "|" + error_code + "|" + step_id + "|" + selector_or_empty + "|" + url_or_empty)`
 
+URL normalization for fingerprint input:
+
+- Lowercase hostname
+- Host + path only (no protocol)
+- Strip query string and fragment
+- Strip trailing slash except root
+- Example:
+  - `https://www.linkedin.com/feed/?trk=xyz#top` -> `www.linkedin.com/feed`
+
 ## Change Process
 
 1. Add new contract constant in `borisbot/contracts.py`.

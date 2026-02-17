@@ -6,6 +6,7 @@ import subprocess
 import os
 import sys
 import time
+import re
 import httpx
 import socket
 from copy import deepcopy
@@ -370,15 +371,15 @@ def release_check(
     min_average_score: float = typer.Option(70.0, "--min-average-score"),
     max_fragile: int = typer.Option(5, "--max-fragile"),
     max_high_risk: int = typer.Option(0, "--max-high-risk"),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON only"),
 ):
     """Run full release gate: test suite + workflow lint checks."""
+    if not isinstance(json_output, bool):
+        json_output = False
     verify_result = _run_verify_suite()
-    if verify_result["stdout"]:
-        typer.echo(verify_result["stdout"].rstrip())
-    if verify_result["stderr"]:
-        typer.echo(verify_result["stderr"].rstrip(), err=True)
-    if verify_result["returncode"] != 0:
-        raise typer.Exit(code=verify_result["returncode"])
+    verify_summary = _summarize_verify_output(
+        verify_result["stdout"], verify_result["stderr"], verify_result["returncode"]
+    )
 
     workflow_outputs = []
     has_lint_failure = False
@@ -407,12 +408,31 @@ def release_check(
             )
         workflow_outputs.append(item)
 
-    release_output = {"verify_status": "ok", "workflows": workflow_outputs}
+    verify_failed = verify_result["returncode"] != 0
+    release_output = {
+        "verify_status": "ok" if not verify_failed else "failed",
+        "verify": verify_summary,
+        "workflows": workflow_outputs,
+    }
     if has_lint_failure:
         failed_items = [item for item in workflow_outputs if item.get("status") == "failed"]
         release_output["failure"] = failed_items[0].get("failure") if failed_items else None
-    typer.echo(json.dumps(release_output, indent=2))
-    if has_lint_failure:
+    if verify_failed and not release_output.get("failure"):
+        release_output["failure"] = build_failure(
+            error_class="interaction_failed",
+            error_code="VERIFY_SUITE_FAILED",
+            step_id="verify",
+            selector="",
+            url="",
+            message=verify_summary.get("status", "verify suite failed"),
+        )
+
+    if json_output:
+        typer.echo(json.dumps(release_output, indent=2))
+    else:
+        _print_release_check_human(release_output)
+
+    if has_lint_failure or verify_failed:
         raise typer.Exit(code=1)
 
 
@@ -473,6 +493,54 @@ def _run_verify_suite() -> dict:
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
+
+
+def _summarize_verify_output(stdout: str, stderr: str, returncode: int) -> dict:
+    """Extract concise verify summary from unittest output."""
+    combined = f"{stdout or ''}\n{stderr or ''}"
+    ran_match = re.search(r"Ran (\d+) tests", combined)
+    ran = int(ran_match.group(1)) if ran_match else 0
+    passed = ran if returncode == 0 else 0
+    status = "ok" if returncode == 0 else "failed"
+    return {"status": status, "passed": passed, "total": ran}
+
+
+def _print_release_check_human(release_output: dict) -> None:
+    """Print compact release-check summary for humans."""
+    verify = release_output.get("verify", {})
+    workflows = release_output.get("workflows", [])
+    failed_workflows = [item for item in workflows if item.get("status") == "failed"]
+    verify_failed = release_output.get("verify_status") != "ok"
+    overall_failed = verify_failed or bool(failed_workflows)
+
+    if not overall_failed:
+        typer.echo("RELEASE CHECK: PASS")
+        typer.echo(f"  tests: {verify.get('passed', 0)}/{verify.get('total', 0)}")
+        typer.echo(f"  workflows: {len(workflows)}/{len(workflows)}")
+        return
+
+    typer.echo("RELEASE CHECK: FAIL")
+    if verify_failed:
+        typer.echo(
+            f"  tests: {verify.get('passed', 0)}/{verify.get('total', 0)} "
+            "(verify suite failed)"
+        )
+    for item in failed_workflows:
+        workflow_name = Path(item.get("workflow_path", "")).name or item.get("workflow_path", "")
+        failure = item.get("failure") or {}
+        fingerprint = str(failure.get("fingerprint", ""))
+        short_fingerprint = fingerprint[:8] if fingerprint else ""
+        typer.echo("")
+        typer.echo(f"  Workflow: {workflow_name}")
+        typer.echo(
+            "    - "
+            f"{failure.get('error_class', 'interaction_failed')} "
+            f"({failure.get('error_code', 'UNKNOWN')})"
+        )
+        if failure.get("step_id"):
+            typer.echo(f"      step={failure['step_id']}")
+        if short_fingerprint:
+            typer.echo(f"      fingerprint={short_fingerprint}")
 
 
 def psutil_pid_exists(pid):

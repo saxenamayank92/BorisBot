@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import hashlib
+from urllib.parse import urlparse
 
 from borisbot.contracts import ERROR_SCHEMA_V1
+
+
+def normalize_url_for_fingerprint(url: str) -> str:
+    """Normalize URL by host+path for stable failure fingerprinting."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    hostname = (parsed.hostname or "").strip().lower()
+    path = (parsed.path or "").strip()
+    if not hostname:
+        return ""
+    if not path:
+        path = "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    if path == "/":
+        return hostname
+    return f"{hostname}{path}"
 
 
 def build_failure(
@@ -17,13 +37,14 @@ def build_failure(
     selector: str = "",
 ) -> dict[str, str]:
     """Build a stable failure payload for runtime outputs and persisted reports."""
+    normalized_url = normalize_url_for_fingerprint(url)
     fingerprint_input = "|".join(
         [
             error_class,
             error_code,
             step_id or "",
             selector or "",
-            url or "",
+            normalized_url,
         ]
     )
     fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
@@ -32,7 +53,7 @@ def build_failure(
         "error_class": error_class,
         "error_code": error_code,
         "step_id": step_id,
-        "url": url or "",
+        "url": normalized_url,
         "message": message,
         "fingerprint": fingerprint,
     }
