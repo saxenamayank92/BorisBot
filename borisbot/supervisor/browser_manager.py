@@ -199,22 +199,24 @@ class BrowserManager:
 
         run_result = await self._run_command(
             [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                container_name,
-                "-v",
-                f"{profile_path}:/browser-profile",
-                "-p",
-                "127.0.0.1::9222",
-                "-p",
-                "127.0.0.1::5900",
-                "-p",
-                "127.0.0.1::6080",
-                IMAGE_NAME,
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container_name,
+        "-v",
+        f"{profile_path}:/browser-profile",
+        "--dns", "8.8.8.8",
+        "--dns", "1.1.1.1",
+        "-p", "9222",
+        "-p", "5900",
+        "-p", "6080",
+        IMAGE_NAME,
             ]
         )
+
+        
+        
         if run_result.stdout:
             logger.info("Docker run stdout: %s", run_result.stdout.strip())
         if run_result.stderr:
