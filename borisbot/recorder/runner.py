@@ -82,6 +82,20 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
         await stop_event.wait()
 
         workflow = session.finalize()
+        current_url = page.url
+        commands = workflow.get("commands", [])
+        has_navigate = any(cmd.get("action") == "navigate" for cmd in commands)
+        if commands and not has_navigate and isinstance(current_url, str) and current_url.strip():
+            commands.insert(
+                0,
+                {
+                    "id": "0",
+                    "action": "navigate",
+                    "params": {"url": current_url},
+                },
+            )
+            for idx, cmd in enumerate(commands, start=1):
+                cmd["id"] = str(idx)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{task_id}.json"
         output_path.write_text(json.dumps(workflow, indent=2), encoding="utf-8")
