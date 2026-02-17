@@ -29,7 +29,7 @@ async def run_record(
     output_dir: Path = Path("workflows"),
 ) -> dict:
     """Record a workflow and immediately replay it through TaskRunner."""
-    session = RecordingSession(task_id=task_id)
+    session = RecordingSession(task_id=task_id, start_url=start_url)
     server = RecordingServer(session=session, port=7331)
     await server.start()
 
