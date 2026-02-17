@@ -37,7 +37,8 @@ echo "[browser-image] Starting Playwright Chromium with CDP on port 9222"
 "${CHROME_BIN}" \
   --remote-debugging-address=0.0.0.0 \
   --remote-debugging-port=9222 \
-  --remote-allow-origins=* \
+  --remote-debugging-pipe=false \
+  --enable-automation \
   --no-sandbox \
   --disable-dev-shm-usage \
   --disable-gpu \
@@ -46,8 +47,6 @@ echo "[browser-image] Starting Playwright Chromium with CDP on port 9222"
   --no-default-browser-check \
   --disable-background-networking \
   --user-data-dir=/browser-profile \
-  --disable-features=UseChromeOSDirectVideoDecoder \
-  --disable-ipv6 \
   > /tmp/chrome.log 2>&1 &
 
 log "Starting x11vnc on port ${VNC_PORT}"
