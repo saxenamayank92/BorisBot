@@ -14,6 +14,7 @@ from typing import Optional
 from uuid import uuid4
 
 from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHEMA_V1
+from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
@@ -340,10 +341,17 @@ def inspect(task_id: str):
     typer.echo(json.dumps(details, indent=2))
 
 
+@app.command("analyze-workflow")
+def analyze_workflow(workflow_path: Path):
+    """Score selector robustness from a recorded workflow (no browser execution)."""
+    report = analyze_workflow_file(workflow_path)
+    typer.echo(json.dumps(report, indent=2))
+
+
 @app.command()
 def verify():
     """Run deterministic reliability checks used as release gate."""
-    cmd = [sys.executable, "-m", "unittest", "-v", "tests/test_reliability_loops.py"]
+    cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.stdout:
         typer.echo(result.stdout.rstrip())
