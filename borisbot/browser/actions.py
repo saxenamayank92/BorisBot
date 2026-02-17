@@ -42,9 +42,9 @@ class BrowserActions:
                 last_url = current_url
             await asyncio.sleep(0.2)
 
-        title = (await page.title()).strip()
-        if not title:
-            raise RuntimeError("Page loaded with empty title")
+        ready_state = await page.evaluate("document.readyState")
+        if ready_state not in ("interactive", "complete"):
+            raise RuntimeError("Page failed to reach interactive state")
 
     async def _execute_click(self, selector: str, timeout: int) -> None:
         """Execute one deterministic click attempt with stabilization checks."""

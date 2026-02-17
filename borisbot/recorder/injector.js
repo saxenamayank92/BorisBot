@@ -2,6 +2,13 @@
   "use strict";
 
   try {
+    // Record only top-level document interactions; ignore iframes.
+    try {
+      if (window.top !== window.self) return;
+    } catch (_) {
+      return;
+    }
+
     const RECORD_HOST = window.__BORIS_RECORD_HOST__ || "host.docker.internal";
     const RECORD_PORT = window.__BORIS_RECORD_PORT__ || 7331;
     const ENDPOINT = `http://${RECORD_HOST}:${RECORD_PORT}/event`;
