@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -25,10 +26,15 @@ class RecordingServer:
 
     async def _handle_event(self, request: web.Request) -> web.Response:
         """Accept and process recorder event payload."""
+        body: dict[str, Any] = {}
         try:
-            body: dict[str, Any] = await request.json()
+            body = await request.json()
         except Exception:
-            return web.json_response({"status": "bad_request"}, status=400)
+            try:
+                raw = await request.text()
+                body = json.loads(raw) if raw else {}
+            except Exception:
+                return web.json_response({"status": "bad_request"}, status=400)
 
         event_type = body.get("event_type")
         payload = body.get("payload", {})

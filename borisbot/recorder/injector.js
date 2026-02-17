@@ -79,7 +79,7 @@
           mode: "no-cors",
           cache: "no-store",
           keepalive: true,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "text/plain;charset=UTF-8" },
           body,
         }).catch(() => {});
       } catch (_) {

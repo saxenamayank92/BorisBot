@@ -15,6 +15,7 @@ from borisbot.browser.task_runner import TaskRunner
 from borisbot.recorder.server import RecordingServer
 from borisbot.recorder.session import RecordingSession
 from borisbot.supervisor.browser_manager import BrowserManager
+from borisbot.supervisor.capability_manager import CapabilityManager
 
 logger = logging.getLogger("borisbot.recorder.runner")
 
@@ -33,6 +34,11 @@ async def run_record(task_id: str, output_dir: Path = Path("workflows")) -> dict
     executor: BrowserExecutor | None = None
 
     try:
+        capabilities = await CapabilityManager.get_capabilities(agent_id) or []
+        has_browser_cap = any(row["capability_type"] == "BROWSER" for row in capabilities)
+        if not has_browser_cap:
+            await CapabilityManager.add_capability(agent_id, "BROWSER", "{}")
+
         browser_session = await manager.request_session(agent_id)
         executor = BrowserExecutor(browser_session["cdp_port"])
         await executor.connect()
