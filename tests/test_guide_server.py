@@ -8,6 +8,7 @@ from unittest import mock
 from borisbot.guide.server import (
     GuideState,
     _collect_runtime_status,
+    _build_ollama_setup_plan,
     _resolve_ollama_install_command,
     _resolve_ollama_start_command,
     _resolve_model_for_provider,
@@ -101,6 +102,26 @@ class GuideServerCommandTests(unittest.TestCase):
             which=lambda name: "/bin/systemctl" if name == "systemctl" else None,
         )
         self.assertEqual(cmd, ["systemctl", "--user", "start", "ollama"])
+
+    def test_build_ollama_setup_plan_includes_commands(self) -> None:
+        plan = _build_ollama_setup_plan(
+            "llama3.2:3b",
+            platform_name="linux",
+            which=lambda _: "/usr/bin/fake",
+        )
+        self.assertEqual(plan["platform"], "linux")
+        self.assertEqual(plan["pull_command"], ["ollama", "pull", "llama3.2:3b"])
+        self.assertTrue(plan["install_command"])
+        self.assertEqual(plan["start_command"], ["systemctl", "--user", "start", "ollama"])
+
+    def test_build_ollama_setup_plan_handles_missing_installer(self) -> None:
+        plan = _build_ollama_setup_plan(
+            "llama3.2:3b",
+            platform_name="darwin",
+            which=lambda _: None,
+        )
+        self.assertIsNone(plan["install_command"])
+        self.assertIn("Homebrew not found", plan["install_error"])
 
     def test_required_tool_mapping(self) -> None:
         self.assertEqual(required_tool_for_action("record"), "browser")
@@ -454,6 +475,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("Provider Onboarding", html)
         self.assertIn("refreshProviderSecrets()", html)
         self.assertIn("testPrimaryProvider()", html)
+        self.assertIn("Show Setup Plan", html)
+        self.assertIn("showOllamaSetupPlan()", html)
         self.assertIn("clearChatHistory()", html)
         self.assertIn("provider-cards", html)
 

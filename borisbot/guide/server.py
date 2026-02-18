@@ -96,6 +96,33 @@ def _resolve_ollama_start_command(
     return ["ollama", "serve"]
 
 
+def _build_ollama_setup_plan(
+    model_name: str,
+    platform_name: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> dict:
+    """Return cross-platform Ollama setup plan for GUI onboarding."""
+    model = (model_name or "").strip() or "llama3.2:3b"
+    platform_value = (platform_name or sys.platform).strip().lower()
+    install_command: list[str] | None = None
+    install_error = ""
+    try:
+        install_command = _resolve_ollama_install_command(platform_value, which=which)
+    except ValueError as exc:
+        install_error = str(exc)
+    start_command = _resolve_ollama_start_command(platform_value, which=which)
+    plan = {
+        "platform": platform_value,
+        "model_name": model,
+        "install_command": install_command,
+        "start_command": start_command,
+        "pull_command": ["ollama", "pull", model],
+        "manual_download_url": "https://ollama.com/download",
+        "install_error": install_error,
+    }
+    return plan
+
+
 ACTION_TOOL_MAP = {
     "docker_info": TOOL_SHELL,
     "cleanup_sessions": TOOL_BROWSER,
@@ -1004,6 +1031,11 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/runtime-status":
                 self._json_response(state.runtime_status())
                 return
+            if self.path.startswith("/api/ollama-setup-plan"):
+                query = parse_qs(urlsplit(self.path).query)
+                model_name = str(query.get("model_name", ["llama3.2:3b"])[0]).strip() or "llama3.2:3b"
+                self._json_response(_build_ollama_setup_plan(model_name))
+                return
             if self.path == "/api/profile":
                 self._json_response(load_profile())
                 return
@@ -1531,10 +1563,12 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('cleanup_sessions')">Reset Browser Sessions</button>
             <button onclick="runAction('verify')">Run Verify</button>
             <button onclick="runAction('session_status')">Session Status</button>
+            <button class="secondary" onclick="showOllamaSetupPlan()">Show Setup Plan</button>
             <button onclick="runPlanPreview()">Dry-Run Planner</button>
             <button onclick="executeApprovedPlan()">Execute Approved Plan</button>
             <button onclick="saveProfile()">Save Profile</button>
           </div>
+          <pre id="ollama-setup-plan" style="margin-top:8px;min-height:70px;"></pre>
         </div>
 
         <div class="step">
@@ -1728,6 +1762,37 @@ def _render_html(workflows: list[str]) -> str:
       }} catch (e) {{
         document.getElementById('meta').textContent = 'One-touch setup failed unexpectedly.';
       }}
+    }}
+
+    async function showOllamaSetupPlan() {{
+      const model_name = document.getElementById('model').value || 'llama3.2:3b';
+      const response = await fetch(`/api/ollama-setup-plan?model_name=${{encodeURIComponent(model_name)}}`);
+      if (!response.ok) {{
+        document.getElementById('ollama-setup-plan').textContent = 'Failed to load setup plan.';
+        return;
+      }}
+      const data = await response.json();
+      const lines = [];
+      lines.push(`platform: ${{data.platform || 'unknown'}}`);
+      lines.push(`model: ${{data.model_name || model_name}}`);
+      if (Array.isArray(data.install_command) && data.install_command.length) {{
+        lines.push(`install: ${{data.install_command.join(' ')}}`);
+      }} else {{
+        lines.push('install: manual download required');
+      }}
+      if (data.install_error) {{
+        lines.push(`install_note: ${{data.install_error}}`);
+      }}
+      if (Array.isArray(data.start_command) && data.start_command.length) {{
+        lines.push(`start: ${{data.start_command.join(' ')}}`);
+      }}
+      if (Array.isArray(data.pull_command) && data.pull_command.length) {{
+        lines.push(`pull: ${{data.pull_command.join(' ')}}`);
+      }}
+      if (data.manual_download_url) {{
+        lines.push(`download: ${{data.manual_download_url}}`);
+      }}
+      document.getElementById('ollama-setup-plan').textContent = lines.join('\n');
     }}
 
     async function loadProfile() {{
@@ -2230,6 +2295,7 @@ def _render_html(workflows: list[str]) -> str:
 
     setViewMode('split');
     loadProfile();
+    showOllamaSetupPlan();
     refreshPermissions();
     refreshRuntimeStatus();
     refreshTraces();
