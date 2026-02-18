@@ -2748,6 +2748,17 @@ def _render_html(workflows: list[str]) -> str:
         document.getElementById('meta').textContent = 'Run Dry-Run Planner first.';
         return;
       }}
+      const pending = lastRequiredPermissions.filter(item => item.decision === 'prompt');
+      if (pending.length && !approvePermission) {{
+        const names = pending.map(item => item.tool_name).join(', ');
+        const ok = window.confirm(`This plan needs permission approval for: ${{names}}. Approve now?`);
+        if (!ok) {{
+          document.getElementById('meta').textContent = 'Execution cancelled: required permissions not approved.';
+          return;
+        }}
+        await approveRequiredPermissions();
+        return executeApprovedPlan(true, forceExecute);
+      }}
       const response = await fetch('/api/execute-plan', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
