@@ -19,6 +19,7 @@ from borisbot.guide.server import (
     _generate_plan_raw_with_provider,
     _probe_provider_connection,
     _provider_is_usable,
+    _enforce_execute_permissions,
     _trace_already_executed,
     _normalize_browser_ui_url,
     _estimate_tokens,
@@ -588,6 +589,38 @@ class GuideServerCommandTests(unittest.TestCase):
             ]
         }
         self.assertTrue(_trace_already_executed(trace))
+
+    def test_enforce_execute_permissions_uses_preview_tools(self) -> None:
+        preview = {
+            "required_permissions": [
+                {"tool_name": "filesystem", "decision": "prompt"},
+                {"tool_name": "browser", "decision": "prompt"},
+            ]
+        }
+        with mock.patch("borisbot.guide.server.get_agent_tool_permission_sync", side_effect=["allow", "prompt"]):
+            error = _enforce_execute_permissions("agent_a", preview, approve_permission=False)
+        self.assertIsInstance(error, dict)
+        assert isinstance(error, dict)
+        self.assertEqual(error["error"], "permission_required")
+        self.assertEqual(error["tool_name"], "browser")
+
+    def test_enforce_execute_permissions_auto_approves_prompt_tools(self) -> None:
+        preview = {"required_permissions": [{"tool_name": "web_fetch", "decision": "prompt"}]}
+        with mock.patch("borisbot.guide.server.get_agent_tool_permission_sync", return_value="prompt"), mock.patch(
+            "borisbot.guide.server.set_agent_tool_permission_sync"
+        ) as set_perm:
+            error = _enforce_execute_permissions("agent_b", preview, approve_permission=True)
+        self.assertIsNone(error)
+        set_perm.assert_called_once_with("agent_b", "web_fetch", "allow")
+
+    def test_enforce_execute_permissions_defaults_to_browser(self) -> None:
+        preview = {"status": "ok"}
+        with mock.patch("borisbot.guide.server.get_agent_tool_permission_sync", return_value="deny"):
+            error = _enforce_execute_permissions("agent_c", preview, approve_permission=False)
+        self.assertIsInstance(error, dict)
+        assert isinstance(error, dict)
+        self.assertEqual(error["error"], "permission_denied")
+        self.assertEqual(error["tool_name"], "browser")
 
 
 if __name__ == "__main__":

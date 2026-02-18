@@ -983,6 +983,47 @@ def _trace_already_executed(trace: dict) -> bool:
     return False
 
 
+def _enforce_execute_permissions(
+    agent_id: str,
+    latest_preview: dict,
+    *,
+    approve_permission: bool,
+) -> dict | None:
+    """Validate all required tool permissions for execute-plan."""
+    tools: list[str] = []
+    required_permissions = latest_preview.get("required_permissions", [])
+    if isinstance(required_permissions, list):
+        for row in required_permissions:
+            if not isinstance(row, dict):
+                continue
+            tool_name = str(row.get("tool_name", "")).strip()
+            if tool_name:
+                tools.append(tool_name)
+    if not tools:
+        tools = [TOOL_BROWSER]
+
+    for tool_name in tools:
+        decision = get_agent_tool_permission_sync(agent_id, tool_name)
+        if decision == DECISION_DENY:
+            return {
+                "error": "permission_denied",
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "message": f"Tool '{tool_name}' is denied for agent '{agent_id}'.",
+            }
+        if decision == DECISION_PROMPT:
+            if approve_permission:
+                set_agent_tool_permission_sync(agent_id, tool_name, DECISION_ALLOW)
+                continue
+            return {
+                "error": "permission_required",
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "message": f"Agent '{agent_id}' requires approval for tool '{tool_name}'.",
+            }
+    return None
+
+
 def build_action_command(
     action: str,
     params: dict[str, str],
@@ -1657,35 +1698,20 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     return
 
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
-                required_tool = TOOL_BROWSER
-                decision = get_agent_tool_permission_sync(agent_id, required_tool)
                 approve_permission = bool(payload.get("approve_permission", False))
-                if decision == DECISION_DENY:
-                    self._json_response(
-                        {
-                            "error": "permission_denied",
-                            "agent_id": agent_id,
-                            "tool_name": required_tool,
-                            "message": f"Tool '{required_tool}' is denied for agent '{agent_id}'.",
-                        },
-                        status=HTTPStatus.FORBIDDEN,
+                permission_error = _enforce_execute_permissions(
+                    agent_id,
+                    latest_preview,
+                    approve_permission=approve_permission,
+                )
+                if isinstance(permission_error, dict):
+                    status = (
+                        HTTPStatus.FORBIDDEN
+                        if permission_error.get("error") == "permission_denied"
+                        else HTTPStatus.CONFLICT
                     )
+                    self._json_response(permission_error, status=status)
                     return
-                if decision == DECISION_PROMPT and not approve_permission:
-                    self._json_response(
-                        {
-                            "error": "permission_required",
-                            "agent_id": agent_id,
-                            "tool_name": required_tool,
-                            "message": (
-                                f"Agent '{agent_id}' requires approval for tool '{required_tool}'."
-                            ),
-                        },
-                        status=HTTPStatus.CONFLICT,
-                    )
-                    return
-                if decision == DECISION_PROMPT and approve_permission:
-                    set_agent_tool_permission_sync(agent_id, required_tool, DECISION_ALLOW)
 
                 generated_dir = state.workspace / "workflows" / "generated"
                 generated_dir.mkdir(parents=True, exist_ok=True)
