@@ -1,11 +1,19 @@
 from fastapi import FastAPI, HTTPException
 import asyncio
 import logging
+import os
+from datetime import datetime
 from .database import get_db, init_db
 from .models import AgentCreate, AgentResponse
 from .agent_manager import AgentManager
 from .browser_manager import BrowserManager
+from .heartbeat_runtime import HeartbeatSupervisor
+from borisbot.llm.ollama_health import startup_mark_ollama_health
+from borisbot.llm.provider_health import get_provider_health_registry
+from .api_admin import router as admin_router
 from .api_metrics import router as metrics_router
+from .api_stream import router as stream_router
+from .api_tasks import router as task_router
 
 # Configure logging
 logging.basicConfig(
@@ -21,9 +29,13 @@ ttl_logger = logging.getLogger("borisbot.supervisor.ttl_worker")
 
 TTL_INTERVAL_SECONDS = 30
 _ttl_task: asyncio.Task | None = None
+_heartbeat_task: asyncio.Task | None = None
 
 app = FastAPI(title="BorisBot Supervisor")
+app.include_router(task_router)
+app.include_router(admin_router)
 app.include_router(metrics_router)
+app.include_router(stream_router)
 
 
 async def _ttl_enforcement_loop():
@@ -37,7 +49,7 @@ async def _ttl_enforcement_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    global _ttl_task
+    global _ttl_task, _heartbeat_task
     logger.info("Initializing database...")
     await init_db()
 
@@ -58,8 +70,33 @@ async def startup_event():
         )
         await db.commit()
     await browser_manager.expire_stale_sessions()
+    session_started_at = datetime.utcnow().isoformat()
+    async for db in get_db():
+        await db.execute(
+            """
+            INSERT INTO system_settings (key, value)
+            VALUES ('runtime_session_started_at', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (session_started_at,),
+        )
+        await db.commit()
+        break
+    try:
+        ollama_model = os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b")
+        healthy = await startup_mark_ollama_health(
+            get_provider_health_registry(),
+            model_name=ollama_model,
+            provider_name="ollama",
+        )
+        logger.info("Ollama startup probe status=%s model=%s", "healthy" if healthy else "unhealthy", ollama_model)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Ollama startup probe failed: %s", exc)
 
     _ttl_task = asyncio.create_task(_ttl_enforcement_loop())
+    heartbeat_supervisor = HeartbeatSupervisor()
+    await heartbeat_supervisor.initialize_on_startup()
+    _heartbeat_task = asyncio.create_task(heartbeat_supervisor.run_forever())
     
     # Start the agent monitoring loop
     asyncio.create_task(AgentManager.monitor_agents())
@@ -68,7 +105,14 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global _ttl_task
+    global _ttl_task, _heartbeat_task
+    if _heartbeat_task:
+        _heartbeat_task.cancel()
+        try:
+            await _heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        _heartbeat_task = None
     if _ttl_task:
         _ttl_task.cancel()
         try:

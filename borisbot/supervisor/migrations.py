@@ -102,6 +102,103 @@ MIGRATIONS: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        "20260217_create_task_events",
+        """
+        CREATE TABLE IF NOT EXISTS task_events (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "20260217_create_task_events_task_id_index",
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_events_task_id
+        ON task_events(task_id, created_at)
+        """,
+    ),
+    (
+        "20260217_create_system_settings",
+        """
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "20260217_create_model_pricing",
+        """
+        CREATE TABLE IF NOT EXISTS model_pricing (
+            model_name TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            input_cost_per_1k_tokens REAL NOT NULL,
+            output_cost_per_1k_tokens REAL NOT NULL
+        )
+        """,
+    ),
+    (
+        "20260217_create_cloud_usage",
+        """
+        CREATE TABLE IF NOT EXISTS cloud_usage (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            cost_usd REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "20260217_create_cloud_usage_agent_date_index",
+        """
+        CREATE INDEX IF NOT EXISTS idx_cloud_usage_agent_date
+        ON cloud_usage(agent_id, created_at)
+        """,
+    ),
+    (
+        "20260217_create_cloud_usage_created_index",
+        """
+        CREATE INDEX IF NOT EXISTS idx_cloud_usage_created
+        ON cloud_usage(created_at)
+        """,
+    ),
+    (
+        "20260218_create_agent_tool_permissions",
+        """
+        CREATE TABLE IF NOT EXISTS agent_tool_permissions (
+            agent_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (agent_id, tool_name)
+        )
+        """,
+    ),
+    (
+        "20260217_seed_default_system_settings",
+        """
+        INSERT OR IGNORE INTO system_settings (key, value) VALUES
+            ('daily_budget_usd', '20'),
+            ('monthly_budget_usd', '300')
+        """,
+    ),
+    (
+        "20260217_seed_default_model_pricing",
+        """
+        INSERT OR IGNORE INTO model_pricing (
+            model_name, provider, input_cost_per_1k_tokens, output_cost_per_1k_tokens
+        ) VALUES (
+            'gpt-4o', 'openai', 0.005, 0.015
+        )
+        """,
+    ),
 ]
 
 

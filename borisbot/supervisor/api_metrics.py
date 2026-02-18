@@ -4,9 +4,14 @@ import logging
 
 from fastapi import APIRouter
 
+from borisbot.llm.cost_guard import CostGuard
+from borisbot.llm.provider_health import get_provider_health_registry
 from borisbot.supervisor.database import get_db
+from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
 
 logger = logging.getLogger("borisbot.supervisor.api_metrics")
+cost_guard = CostGuard()
+provider_health_registry = get_provider_health_registry()
 
 router = APIRouter()
 
@@ -85,3 +90,30 @@ async def get_active_task_metrics():
             for row in rows
         ]
     }
+
+
+@router.get("/metrics/cost")
+async def get_cost_metrics():
+    """Return global and per-agent cloud usage cost metrics."""
+    snapshot = await cost_guard.get_spend_snapshot()
+    agent_spend = await cost_guard.get_agent_spend_today()
+    return {
+        "daily_spend_usd": snapshot["daily_spend"],
+        "monthly_spend_usd": snapshot["monthly_spend"],
+        "daily_limit_usd": snapshot["daily_limit"],
+        "monthly_limit_usd": snapshot["monthly_limit"],
+        "agent_spend_today": agent_spend,
+    }
+
+
+@router.get("/metrics/providers")
+async def get_provider_metrics():
+    """Return provider-level health and circuit breaker stats."""
+    return provider_health_registry.get_snapshot()
+
+
+@router.get("/metrics/heartbeat")
+async def get_runtime_heartbeat():
+    """Return latest persisted runtime heartbeat snapshot."""
+    snapshot = read_heartbeat_snapshot()
+    return snapshot or {"status": "unavailable"}

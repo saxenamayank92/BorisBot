@@ -1,0 +1,1127 @@
+"""Local guided web UI for common BorisBot reliability workflows."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from dataclasses import dataclass, field
+from datetime import datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Callable
+from urllib.parse import urlparse
+
+import httpx
+
+from borisbot.llm.errors import LLMInvalidOutputError
+from borisbot.llm.planner_contract import parse_planner_output
+from borisbot.llm.cost_guard import CostGuard
+from borisbot.llm.provider_health import get_provider_health_registry
+from borisbot.supervisor.database import get_db
+from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
+from borisbot.supervisor.tool_permissions import (
+    DECISION_ALLOW,
+    DECISION_DENY,
+    DECISION_PROMPT,
+    TOOL_BROWSER,
+    TOOL_FILESYSTEM,
+    TOOL_SCHEDULER,
+    TOOL_SHELL,
+    TOOL_WEB_FETCH,
+    get_agent_tool_permission_sync,
+    set_agent_tool_permission_sync,
+)
+
+
+def _resolve_ollama_install_command(
+    platform_name: str,
+    which: Callable[[str], str | None] = shutil.which,
+) -> list[str]:
+    """Return OS-aware install command for Ollama."""
+    if platform_name.startswith("darwin"):
+        if which("brew"):
+            return ["brew", "install", "ollama"]
+        raise ValueError("Homebrew not found. Install Homebrew first: https://brew.sh")
+    if platform_name.startswith("linux"):
+        return ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+    if platform_name.startswith("win") or os.name == "nt":
+        if which("winget"):
+            return ["winget", "install", "-e", "--id", "Ollama.Ollama"]
+        raise ValueError(
+            "winget not found. Install Ollama manually from https://ollama.com/download/windows"
+        )
+    raise ValueError(f"Unsupported platform for automated Ollama install: {platform_name}")
+
+
+def _resolve_ollama_start_command(
+    platform_name: str,
+    which: Callable[[str], str | None] = shutil.which,
+) -> list[str]:
+    """Return OS-aware command to start Ollama service/runtime."""
+    if platform_name.startswith("darwin"):
+        if which("brew"):
+            return ["brew", "services", "start", "ollama"]
+        return ["ollama", "serve"]
+    if platform_name.startswith("linux"):
+        if which("systemctl"):
+            return ["systemctl", "--user", "start", "ollama"]
+        return ["ollama", "serve"]
+    if platform_name.startswith("win") or os.name == "nt":
+        return ["ollama", "serve"]
+    return ["ollama", "serve"]
+
+
+ACTION_TOOL_MAP = {
+    "docker_info": TOOL_SHELL,
+    "cleanup_sessions": TOOL_BROWSER,
+    "session_status": TOOL_SHELL,
+    "ollama_check": TOOL_SHELL,
+    "ollama_install": TOOL_SHELL,
+    "ollama_start": TOOL_SHELL,
+    "ollama_pull": TOOL_SHELL,
+    "verify": TOOL_SHELL,
+    "analyze": TOOL_FILESYSTEM,
+    "lint": TOOL_FILESYSTEM,
+    "replay": TOOL_BROWSER,
+    "release_check": TOOL_SHELL,
+    "release_check_json": TOOL_SHELL,
+    "record": TOOL_BROWSER,
+}
+
+
+def required_tool_for_action(action: str) -> str | None:
+    """Return required tool gate for guide action if any."""
+    return ACTION_TOOL_MAP.get(action)
+
+
+PLANNER_ACTION_TOOL_MAP = {
+    "navigate": TOOL_BROWSER,
+    "click": TOOL_BROWSER,
+    "type": TOOL_BROWSER,
+    "wait_for_url": TOOL_BROWSER,
+    "get_text": TOOL_BROWSER,
+    "get_title": TOOL_BROWSER,
+    "read_file": TOOL_FILESYSTEM,
+    "write_file": TOOL_FILESYSTEM,
+    "list_dir": TOOL_FILESYSTEM,
+    "run_shell": TOOL_SHELL,
+    "web_fetch": TOOL_WEB_FETCH,
+    "web_search": TOOL_WEB_FETCH,
+    "schedule": TOOL_SCHEDULER,
+}
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count deterministically from raw text length."""
+    if not text:
+        return 0
+    return max(1, int(round(len(text) / 4)))
+
+
+def _extract_required_tools_from_plan(plan: dict) -> list[str]:
+    """Derive required tool set from planner proposed actions."""
+    tools: set[str] = set()
+    actions = plan.get("proposed_actions", [])
+    if not isinstance(actions, list):
+        return []
+    for action_obj in actions:
+        if not isinstance(action_obj, dict):
+            continue
+        action_name = action_obj.get("action")
+        if not isinstance(action_name, str):
+            continue
+        tool = PLANNER_ACTION_TOOL_MAP.get(action_name.strip())
+        if tool:
+            tools.add(tool)
+    return sorted(tools)
+
+
+def _build_planner_prompt(user_intent: str) -> str:
+    """Build strict planner prompt that must return planner.v1 JSON only."""
+    return (
+        "You are a planning engine.\n"
+        "Return strict JSON only with exact schema:\n"
+        "{"
+        "\"planner_schema_version\":\"planner.v1\","
+        "\"intent\":\"...\","
+        "\"proposed_actions\":[{\"action\":\"...\",\"target\":\"...\",\"input\":\"...\"}]"
+        "}\n"
+        "No markdown. No extra keys. No commentary.\n"
+        f"User request: {user_intent.strip()}"
+    )
+
+
+def _generate_plan_raw_with_ollama(user_intent: str, model_name: str) -> str:
+    """Call Ollama generate endpoint and return raw planner output text."""
+    if shutil.which("ollama") is None:
+        raise ValueError("Ollama is not installed. Install it from Step 1 first.")
+    prompt = _build_planner_prompt(user_intent)
+    response = httpx.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": model_name,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0},
+        },
+        timeout=20.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Ollama generate failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Ollama response payload invalid")
+    output = payload.get("response")
+    if not isinstance(output, str):
+        raise ValueError("Ollama response missing text output")
+    return output
+
+
+def _build_dry_run_preview(intent: str, agent_id: str, model_name: str) -> dict:
+    """Build dry-run planner preview with strict schema + permission requirements."""
+    if not isinstance(intent, str) or not intent.strip():
+        raise ValueError("Plan prompt cannot be empty.")
+    raw_output = _generate_plan_raw_with_ollama(intent, model_name=model_name)
+    try:
+        parsed = parse_planner_output(raw_output)
+    except LLMInvalidOutputError as exc:
+        return {
+            "status": "failed",
+            "error_class": exc.error_class,
+            "error_code": exc.error_code,
+            "message": str(exc),
+            "raw_output": raw_output,
+        }
+
+    required_tools = _extract_required_tools_from_plan(parsed)
+    required_permissions = [
+        {
+            "tool_name": tool,
+            "decision": get_agent_tool_permission_sync(agent_id, tool),
+        }
+        for tool in required_tools
+    ]
+
+    prompt_tokens = _estimate_tokens(_build_planner_prompt(intent))
+    completion_tokens = _estimate_tokens(raw_output)
+    return {
+        "status": "ok",
+        "planner_output": parsed,
+        "required_permissions": required_permissions,
+        "token_estimate": {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+        "cost_estimate_usd": 0.0,
+        "raw_output": raw_output,
+    }
+
+
+def extract_browser_ui_url(output: str) -> str:
+    """Extract latest noVNC/browser URL printed by recorder output."""
+    matches = re.findall(r"Open browser UI at:\s*(https?://\S+)", output or "")
+    if not matches:
+        return ""
+    return matches[-1].strip()
+
+
+def build_action_command(
+    action: str,
+    params: dict[str, str],
+    workspace: Path,
+    python_bin: str,
+) -> list[str]:
+    """Return a whitelisted CLI command for supported guide actions."""
+    workflow_path = params.get("workflow_path", "workflows/real_login_test.json").strip()
+    if not workflow_path:
+        workflow_path = "workflows/real_login_test.json"
+
+    if action == "docker_info":
+        return ["docker", "info"]
+    if action == "cleanup_sessions":
+        return [python_bin, "-m", "borisbot.cli", "cleanup-browsers"]
+    if action == "session_status":
+        return [python_bin, "-m", "borisbot.cli", "session-status"]
+    if action == "ollama_check":
+        return ["ollama", "--version"]
+    if action == "ollama_install":
+        return _resolve_ollama_install_command(sys.platform)
+    if action == "ollama_start":
+        return _resolve_ollama_start_command(sys.platform)
+    if action == "ollama_pull":
+        model = params.get("model_name", "").strip() or "llama3.2:3b"
+        return ["ollama", "pull", model]
+    if action == "verify":
+        return [python_bin, "-m", "borisbot.cli", "verify"]
+    if action == "analyze":
+        return [python_bin, "-m", "borisbot.cli", "analyze-workflow", workflow_path]
+    if action == "lint":
+        return [python_bin, "-m", "borisbot.cli", "lint-workflow", workflow_path]
+    if action == "replay":
+        return [python_bin, "-m", "borisbot.cli", "replay", workflow_path]
+    if action == "release_check":
+        return [python_bin, "-m", "borisbot.cli", "release-check", workflow_path]
+    if action == "release_check_json":
+        return [python_bin, "-m", "borisbot.cli", "release-check", workflow_path, "--json"]
+    if action == "record":
+        task_id = params.get("task_id", "").strip() or "wf_new"
+        start_url = params.get("start_url", "").strip() or "https://example.com"
+        parsed = urlparse(start_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("start_url must include protocol and host, e.g. https://example.com")
+        return [python_bin, "-m", "borisbot.cli", "record", task_id, "--start-url", start_url]
+
+    raise ValueError(f"Unsupported action: {action}")
+
+
+@dataclass
+class GuideJob:
+    """Background process metadata and output buffer."""
+
+    job_id: str
+    action: str
+    command: list[str]
+    status: str = "running"
+    output: list[str] = field(default_factory=list)
+    returncode: int | None = None
+    started_at: float = field(default_factory=time.time)
+    finished_at: float | None = None
+    process: subprocess.Popen[str] | None = None
+    trace_id: str | None = None
+
+    def append(self, line: str) -> None:
+        self.output.append(line)
+        if len(self.output) > 800:
+            self.output = self.output[-800:]
+
+    def to_dict(self) -> dict:
+        output_text = "".join(self.output)
+        return {
+            "job_id": self.job_id,
+            "action": self.action,
+            "command": " ".join(shlex.quote(part) for part in self.command),
+            "status": self.status,
+            "returncode": self.returncode,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "output": output_text,
+            "browser_ui_url": extract_browser_ui_url(output_text),
+        }
+
+
+class GuideState:
+    """Shared mutable state for the guide web app."""
+
+    def __init__(self, workspace: Path, python_bin: str):
+        self.workspace = workspace
+        self.python_bin = python_bin
+        self._jobs: dict[str, GuideJob] = {}
+        self._traces: list[dict] = []
+        self._lock = threading.Lock()
+        self._counter = 0
+        self._trace_counter = 0
+
+    def workflows(self) -> list[str]:
+        workflow_dir = self.workspace / "workflows"
+        if not workflow_dir.exists():
+            return []
+        return sorted(str(p.relative_to(self.workspace)) for p in workflow_dir.glob("*.json"))
+
+    def create_job(self, action: str, params: dict[str, str]) -> GuideJob:
+        if action in {"record", "replay"}:
+            running_browser_job = self._find_running_browser_job()
+            if running_browser_job is not None:
+                raise ValueError(
+                    "A browser job is already running. Stop it before starting another record/replay."
+                )
+        command = build_action_command(action, params, self.workspace, self.python_bin)
+        with self._lock:
+            self._counter += 1
+            job_id = f"job_{self._counter:04d}"
+            job = GuideJob(job_id=job_id, action=action, command=command)
+            self._jobs[job_id] = job
+            trace = self._create_trace_locked(
+                trace_type="action_run",
+                data={
+                    "action": action,
+                    "params": params,
+                    "command": " ".join(shlex.quote(part) for part in command),
+                },
+            )
+            job.trace_id = trace["trace_id"]
+        self._start_job(job)
+        return job
+
+    def list_jobs(self) -> list[dict]:
+        with self._lock:
+            jobs = [job.to_dict() for job in self._jobs.values()]
+        jobs.sort(key=lambda row: row["started_at"], reverse=True)
+        return jobs
+
+    def runtime_status(self) -> dict:
+        """Return runtime status snapshot for GUI display."""
+        return _collect_runtime_status(self.python_bin)
+
+    def list_traces(self) -> list[dict]:
+        """Return recent traces sorted newest first."""
+        with self._lock:
+            return list(reversed(self._traces[-30:]))
+
+    def add_plan_trace(self, *, agent_id: str, model_name: str, intent: str, preview: dict) -> dict:
+        """Append dry-run planner trace entry."""
+        with self._lock:
+            return self._create_trace_locked(
+                trace_type="plan_preview",
+                data={
+                    "agent_id": agent_id,
+                    "model_name": model_name,
+                    "intent": intent,
+                    "preview": preview,
+                },
+            )
+
+    def get_job(self, job_id: str) -> GuideJob | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def stop_job(self, job_id: str) -> bool:
+        job = self.get_job(job_id)
+        if job is None or job.process is None or job.status != "running":
+            return False
+        try:
+            if os.name == "nt":
+                job.process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                os.killpg(job.process.pid, signal.SIGINT)
+            return True
+        except Exception:
+            return False
+
+    def _find_running_browser_job(self) -> GuideJob | None:
+        with self._lock:
+            for job in self._jobs.values():
+                if job.status == "running" and job.action in {"record", "replay"}:
+                    return job
+        return None
+
+    def _start_job(self, job: GuideJob) -> None:
+        env = os.environ.copy()
+        # Ensure child Python CLI output streams immediately into the guide UI.
+        env["PYTHONUNBUFFERED"] = "1"
+        kwargs: dict = {
+            "cwd": str(self.workspace),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "bufsize": 1,
+            "env": env,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        else:
+            kwargs["preexec_fn"] = os.setsid
+        process = subprocess.Popen(job.command, **kwargs)
+        job.process = process
+
+        def _reader() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                job.append(line)
+            process.wait()
+            job.returncode = process.returncode
+            job.finished_at = time.time()
+            job.status = "completed" if process.returncode == 0 else "failed"
+            if job.trace_id:
+                self._append_trace_stage(
+                    job.trace_id,
+                    {
+                        "event": "job_finished",
+                        "status": job.status,
+                        "returncode": job.returncode,
+                    },
+                )
+
+        thread = threading.Thread(target=_reader, daemon=True)
+        thread.start()
+
+    def _create_trace_locked(self, *, trace_type: str, data: dict) -> dict:
+        self._trace_counter += 1
+        trace = {
+            "trace_id": f"trace_{self._trace_counter:05d}",
+            "type": trace_type,
+            "created_at": datetime.utcnow().isoformat(),
+            "stages": [{"event": "created", "at": datetime.utcnow().isoformat(), "data": data}],
+        }
+        self._traces.append(trace)
+        if len(self._traces) > 200:
+            self._traces = self._traces[-200:]
+        return trace
+
+    def _append_trace_stage(self, trace_id: str, stage_data: dict) -> None:
+        with self._lock:
+            for trace in reversed(self._traces):
+                if trace.get("trace_id") == trace_id:
+                    trace.setdefault("stages", []).append(
+                        {
+                            "event": str(stage_data.get("event", "stage")),
+                            "at": datetime.utcnow().isoformat(),
+                            "data": stage_data,
+                        }
+                    )
+                    return
+
+
+def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
+    class GuideHandler(BaseHTTPRequestHandler):
+        def _json_response(self, payload: dict, status: int = HTTPStatus.OK) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _read_json(self) -> dict:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except Exception:
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/":
+                page = _render_html(state.workflows()).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return
+            if self.path == "/api/workflows":
+                self._json_response({"items": state.workflows()})
+                return
+            if self.path == "/api/jobs":
+                self._json_response({"items": state.list_jobs()})
+                return
+            if self.path == "/api/runtime-status":
+                self._json_response(state.runtime_status())
+                return
+            if self.path == "/api/traces":
+                self._json_response({"items": state.list_traces()})
+                return
+            if self.path.startswith("/api/jobs/"):
+                job_id = self.path.split("/")[-1]
+                job = state.get_job(job_id)
+                if job is None:
+                    self._json_response({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                self._json_response(job.to_dict())
+                return
+            self._json_response({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/run":
+                payload = self._read_json()
+                action = str(payload.get("action", "")).strip()
+                params = payload.get("params", {})
+                if not isinstance(params, dict):
+                    params = {}
+                agent_id = str(params.get("agent_id", "default")).strip() or "default"
+                required_tool = required_tool_for_action(action)
+                if required_tool:
+                    decision = get_agent_tool_permission_sync(agent_id, required_tool)
+                    approve_permission = bool(payload.get("approve_permission", False))
+                    if decision == DECISION_DENY:
+                        self._json_response(
+                            {
+                                "error": "permission_denied",
+                                "agent_id": agent_id,
+                                "tool_name": required_tool,
+                                "message": f"Tool '{required_tool}' is denied for agent '{agent_id}'.",
+                            },
+                            status=HTTPStatus.FORBIDDEN,
+                        )
+                        return
+                    if decision == DECISION_PROMPT and not approve_permission:
+                        self._json_response(
+                            {
+                                "error": "permission_required",
+                                "agent_id": agent_id,
+                                "tool_name": required_tool,
+                                "message": (
+                                    f"Agent '{agent_id}' requires approval for tool '{required_tool}'."
+                                ),
+                            },
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
+                    if decision == DECISION_PROMPT and approve_permission:
+                        set_agent_tool_permission_sync(agent_id, required_tool, DECISION_ALLOW)
+                try:
+                    job = state.create_job(action, {k: str(v) for k, v in params.items()})
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(job.to_dict(), status=HTTPStatus.CREATED)
+                return
+            if self.path == "/api/plan-preview":
+                payload = self._read_json()
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                intent = str(payload.get("intent", "")).strip()
+                model_name = str(payload.get("model_name", "llama3.2:3b")).strip() or "llama3.2:3b"
+                try:
+                    preview = _build_dry_run_preview(intent, agent_id=agent_id, model_name=model_name)
+                except ValueError as exc:
+                    self._json_response({"status": "failed", "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                trace = state.add_plan_trace(
+                    agent_id=agent_id,
+                    model_name=model_name,
+                    intent=intent,
+                    preview=preview,
+                )
+                preview["trace_id"] = trace["trace_id"]
+                self._json_response(preview, status=HTTPStatus.OK)
+                return
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/stop"):
+                parts = self.path.split("/")
+                if len(parts) < 4:
+                    self._json_response({"error": "invalid_path"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                job_id = parts[3]
+                stopped = state.stop_job(job_id)
+                if not stopped:
+                    self._json_response({"error": "job_not_running"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response({"status": "stopping", "job_id": job_id})
+                return
+            self._json_response({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    return GuideHandler
+
+
+def _render_html(workflows: list[str]) -> str:
+    options = "\n".join(
+        f'<option value="{wf}">{wf}</option>' for wf in workflows
+    ) or '<option value="workflows/real_login_test.json">workflows/real_login_test.json</option>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BorisBot Guide</title>
+  <style>
+    :root {{
+      --bg: #f4efe7;
+      --panel: #fffaf1;
+      --ink: #1e2a2f;
+      --muted: #5f6a6d;
+      --brand: #0d6e6e;
+      --brand-2: #d67443;
+      --border: #dacfbf;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at 20% 10%, #fffdf6 0%, var(--bg) 55%);
+    }}
+    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 30px; letter-spacing: 0.2px; }}
+    p {{ margin: 0; color: var(--muted); }}
+    .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; align-items: start; }}
+    .card {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 5px 20px rgba(30, 42, 47, 0.06);
+    }}
+    .step {{ margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }}
+    .step:first-child {{ border-top: 0; margin-top: 0; padding-top: 0; }}
+    .step h3 {{ margin: 0 0 6px; font-size: 17px; }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }}
+    button {{
+      border: 0;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--brand);
+      color: #fff;
+    }}
+    button.secondary {{ background: var(--brand-2); }}
+    label {{ display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }}
+    input, select {{
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+      margin-bottom: 10px;
+    }}
+    pre {{
+      margin: 0;
+      background: #111a1f;
+      color: #d9f5eb;
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 300px;
+      max-height: 500px;
+      overflow: auto;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }}
+    .viewer-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+    .viewer-toolbar button {{
+      background: #365564;
+    }}
+    .viewer-toolbar button.mode {{
+      background: #5d7f8e;
+    }}
+    .viewer-grid {{
+      display: grid;
+      gap: 10px;
+      height: 560px;
+    }}
+    .viewer-grid.mode-terminal {{ grid-template-rows: 1fr; }}
+    .viewer-grid.mode-browser {{ grid-template-rows: 1fr; }}
+    .viewer-grid.mode-split {{ grid-template-rows: 1fr 1fr; }}
+    .pane {{
+      min-height: 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+    }}
+    .pane-header {{
+      padding: 8px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      background: #fff7ea;
+    }}
+    .pane-body {{
+      flex: 1;
+      min-height: 0;
+    }}
+    .pane.hidden {{ display: none; }}
+    iframe {{
+      border: 0;
+      width: 100%;
+      height: 100%;
+      background: #0f1519;
+    }}
+    .browser-link {{
+      font-size: 12px;
+      color: var(--brand);
+      margin-bottom: 8px;
+      display: block;
+      word-break: break-all;
+    }}
+    .job-meta {{ font-size: 13px; color: var(--muted); margin-bottom: 8px; }}
+    @media (max-width: 920px) {{
+      .layout {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>BorisBot Guided Validation</h1>
+    <p>Use this checklist UI to run reliability actions without memorizing CLI commands.</p>
+
+    <div class="layout">
+      <section class="card">
+        <label for="workflow">Workflow file</label>
+        <select id="workflow">{options}</select>
+        <label for="task">New task id for recording</label>
+        <input id="task" value="wf_demo" />
+        <label for="agent">Agent id</label>
+        <input id="agent" value="default" />
+        <label for="start">Start URL for recording</label>
+        <input id="start" value="https://example.com" />
+        <label for="model">Ollama model</label>
+        <input id="model" value="llama3.2:3b" />
+        <label for="prompt">Dry-run planner prompt</label>
+        <textarea id="prompt" rows="4" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:10px;">Open LinkedIn feed, scroll a few posts, and like one relevant post.</textarea>
+
+        <div class="step">
+          <h3>1. Environment</h3>
+          <p>Confirm Docker and Ollama are ready, then validate baseline.</p>
+          <div class="actions">
+            <button onclick="runAction('docker_info')">Check Docker</button>
+            <button onclick="runAction('ollama_install')">Install Ollama</button>
+            <button onclick="runAction('ollama_check')">Check Ollama</button>
+            <button onclick="runAction('ollama_start')">Start Ollama</button>
+            <button onclick="runAction('ollama_pull')">Pull Model</button>
+            <button onclick="runAction('cleanup_sessions')">Reset Browser Sessions</button>
+            <button onclick="runAction('verify')">Run Verify</button>
+            <button onclick="runAction('session_status')">Session Status</button>
+            <button onclick="runPlanPreview()">Dry-Run Planner</button>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>2. Record Workflow</h3>
+          <p>Click start, perform actions in the opened noVNC browser, then click stop.</p>
+          <div class="actions">
+            <button class="secondary" onclick="startRecord()">Start Recording</button>
+            <button onclick="stopCurrent()">Stop Recording</button>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>3. Analyze and Lint</h3>
+          <p>Score selectors and catch fragile workflows early.</p>
+          <div class="actions">
+            <button onclick="runAction('analyze')">Analyze Workflow</button>
+            <button onclick="runAction('lint')">Lint Workflow</button>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>4. Replay and Gate</h3>
+          <p>Replay deterministically and run release-check in both modes.</p>
+          <div class="actions">
+            <button onclick="runAction('replay')">Replay Workflow</button>
+            <button onclick="runAction('release_check')">Release Check</button>
+            <button onclick="runAction('release_check_json')">Release Check JSON</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="viewer-card">
+        <div class="step" style="margin-top:0;padding-top:0;border-top:0;">
+          <h3>Runtime Status</h3>
+          <p id="runtime-line">Loading...</p>
+        </div>
+        <div class="job-meta" id="meta">No command running.</div>
+        <pre id="plan-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
+        <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
+        <a class="browser-link" id="browser-link" href="#" target="_blank" style="display:none;"></a>
+        <div class="viewer-toolbar">
+          <button class="mode" onclick="setViewMode('terminal')">Terminal View</button>
+          <button class="mode" onclick="setViewMode('browser')">Browser View</button>
+          <button class="mode" onclick="setViewMode('split')">Split View</button>
+          <button onclick="maximizePane('terminal-pane')">Maximize Terminal</button>
+          <button onclick="maximizePane('browser-pane')">Maximize Browser</button>
+        </div>
+        <div class="viewer-grid mode-split" id="viewer-grid">
+          <div class="pane" id="terminal-pane">
+            <div class="pane-header">Terminal Output</div>
+            <div class="pane-body">
+              <pre id="output"></pre>
+            </div>
+          </div>
+          <div class="pane" id="browser-pane">
+            <div class="pane-header">Live Browser (noVNC)</div>
+            <div class="pane-body">
+              <iframe id="browser-frame" title="Browser view"></iframe>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    let currentJobId = null;
+    let pollHandle = null;
+    let viewMode = 'split';
+
+    function currentParams() {{
+      return {{
+        workflow_path: document.getElementById('workflow').value,
+        task_id: document.getElementById('task').value,
+        agent_id: document.getElementById('agent').value,
+        start_url: document.getElementById('start').value,
+        model_name: document.getElementById('model').value
+      }};
+    }}
+
+    async function runAction(action, approvePermission=false) {{
+      const response = await fetch('/api/run', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action, params: currentParams(), approve_permission: approvePermission}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        if (data.error === 'permission_required') {{
+          const ok = window.confirm(`${{data.message}} Approve now?`);
+          if (ok) {{
+            return runAction(action, true);
+          }}
+          document.getElementById('meta').textContent = 'Permission not granted: ' + (data.tool_name || '');
+          return;
+        }}
+        document.getElementById('meta').textContent = 'Failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      currentJobId = data.job_id;
+      startPolling();
+    }}
+
+    async function runPlanPreview() {{
+      const response = await fetch('/api/plan-preview', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          intent: document.getElementById('prompt').value,
+          agent_id: document.getElementById('agent').value,
+          model_name: document.getElementById('model').value
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('plan-output').textContent = 'Dry-run failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('plan-output').textContent = JSON.stringify(data, null, 2);
+      refreshTraces();
+    }}
+
+    function startRecord() {{
+      runAction('record');
+    }}
+
+    async function stopCurrent() {{
+      if (!currentJobId) return;
+      await fetch(`/api/jobs/${{currentJobId}}/stop`, {{ method: 'POST' }});
+    }}
+
+    function startPolling() {{
+      if (pollHandle) clearInterval(pollHandle);
+      pollHandle = setInterval(refreshJob, 900);
+      refreshJob();
+    }}
+
+    function setViewMode(mode) {{
+      viewMode = mode;
+      const grid = document.getElementById('viewer-grid');
+      grid.classList.remove('mode-terminal', 'mode-browser', 'mode-split');
+      grid.classList.add('mode-' + mode);
+      const terminalPane = document.getElementById('terminal-pane');
+      const browserPane = document.getElementById('browser-pane');
+      terminalPane.classList.toggle('hidden', mode === 'browser');
+      browserPane.classList.toggle('hidden', mode === 'terminal');
+    }}
+
+    function maximizePane(paneId) {{
+      const pane = document.getElementById(paneId);
+      if (!pane) return;
+      if (pane.requestFullscreen) {{
+        pane.requestFullscreen();
+      }}
+    }}
+
+    function updateBrowserLink(url) {{
+      const link = document.getElementById('browser-link');
+      const frame = document.getElementById('browser-frame');
+      if (!url) {{
+        link.style.display = 'none';
+        return;
+      }}
+      link.style.display = 'block';
+      link.href = url;
+      link.textContent = 'Browser UI URL: ' + url;
+      if (frame.src !== url) {{
+        frame.src = url;
+      }}
+    }}
+
+    async function refreshJob() {{
+      if (!currentJobId) return;
+      const response = await fetch(`/api/jobs/${{currentJobId}}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      document.getElementById('meta').textContent = `[${{data.status}}] ${{data.command}}`;
+      document.getElementById('output').textContent = data.output || '';
+      updateBrowserLink(data.browser_ui_url || '');
+      if (data.status !== 'running' && pollHandle) {{
+        clearInterval(pollHandle);
+        pollHandle = null;
+      }}
+    }}
+
+    async function refreshRuntimeStatus() {{
+      try {{
+        const response = await fetch('/api/runtime-status');
+        if (!response.ok) return;
+        const data = await response.json();
+        const ollamaNote = data.ollama_installed ? '' : ' | Ollama=missing (click Install Ollama)';
+        const heal = data.self_heal_healed ? 'recovered' : (data.self_heal_probe_ok ? 'ok' : 'failed');
+        const line = `Provider=${{data.provider_name}}:${{data.model_name}} | Health=${{data.provider_state}} | Budget=${{data.budget_status}} | Today=$${{Number(data.today_cost_usd || 0).toFixed(2)}}/${{Number(data.daily_limit_usd || 0).toFixed(2)}} | Queue=${{data.queue_depth}} | Heartbeat=${{data.heartbeat_age_seconds >= 0 ? data.heartbeat_age_seconds + 's' : 'unknown'}} | Heal=${{heal}}${{ollamaNote}}`;
+        document.getElementById('runtime-line').textContent = line;
+      }} catch (e) {{
+        // keep previous UI state on transient fetch failure
+      }}
+    }}
+
+    async function refreshTraces() {{
+      try {{
+        const response = await fetch('/api/traces');
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        const latest = items.slice(0, 3);
+        document.getElementById('trace-output').textContent = latest.length
+          ? JSON.stringify(latest, null, 2)
+          : 'No traces yet.';
+      }} catch (e) {{
+        // keep existing trace view on fetch failures
+      }}
+    }}
+
+    setViewMode('split');
+    refreshRuntimeStatus();
+    refreshTraces();
+    setInterval(refreshRuntimeStatus, 5000);
+    setInterval(refreshTraces, 5000);
+  </script>
+</body>
+</html>
+"""
+
+
+def run_guide_server(
+    workspace: Path,
+    host: str = "127.0.0.1",
+    port: int = 7788,
+    open_browser: bool = True,
+) -> None:
+    """Run the guided web server until interrupted."""
+    state = GuideState(workspace=workspace, python_bin=sys.executable)
+    handler = _make_handler(state)
+    server = ThreadingHTTPServer((host, port), handler)
+    url = f"http://{host}:{port}"
+    print(f"BorisBot guide available at: {url}")
+    print("Press Ctrl+C to stop the guide server.")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def _collect_runtime_status(python_bin: str) -> dict:
+    """Collect runtime status for GUI without requiring CLI invocation."""
+    model_name = os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b")
+    provider_name = "ollama"
+    provider_state = "unknown"
+    budget_status = "ok"
+    today_cost = 0.0
+    daily_limit = 0.0
+    daily_remaining = 0.0
+    session_tokens = 0
+    session_cost = 0.0
+    active_tasks = 0
+    queue_depth = 0
+    heartbeat_age = -1
+    self_heal_probe_ok = False
+    self_heal_healed = False
+    ollama_installed = shutil.which("ollama") is not None
+
+    try:
+        response = httpx.get("http://127.0.0.1:7777/metrics/providers", timeout=1.5)
+        payload = response.json() if response.status_code == 200 else {}
+        if isinstance(payload, dict):
+            row = payload.get(provider_name, {})
+            if isinstance(row, dict):
+                provider_state = str(row.get("state", provider_state))
+    except Exception:
+        row = get_provider_health_registry().get_snapshot().get(provider_name, {})
+        if isinstance(row, dict):
+            provider_state = str(row.get("state", provider_state))
+
+    try:
+        budget = asyncio.run(CostGuard().get_budget_status("default"))
+        budget_status = str(budget.get("status", "ok")).upper()
+        today_cost = float(budget.get("daily_spend", 0.0))
+        daily_limit = float(budget.get("daily_limit", 0.0))
+        daily_remaining = float(budget.get("daily_remaining", 0.0))
+    except Exception:
+        pass
+
+    try:
+        cost_guard = CostGuard()
+        session_start = asyncio.run(cost_guard.get_runtime_session_started_at())
+        usage = asyncio.run(cost_guard.get_usage_window(start_iso=session_start))
+        session_tokens = int(usage.get("total_tokens", 0))
+        session_cost = float(usage.get("cost_usd", 0.0))
+    except Exception:
+        pass
+
+    async def _task_counts() -> tuple[int, int]:
+        async for db in get_db():
+            cursor = await db.execute("SELECT COUNT(*) AS count FROM tasks WHERE status = 'running'")
+            row = await cursor.fetchone()
+            running = int(row["count"] if row else 0)
+            cursor = await db.execute("SELECT COUNT(*) AS count FROM task_queue")
+            row = await cursor.fetchone()
+            depth = int(row["count"] if row else 0)
+            return running, depth
+        return 0, 0
+
+    try:
+        active_tasks, queue_depth = asyncio.run(_task_counts())
+    except Exception:
+        pass
+
+    heartbeat = read_heartbeat_snapshot()
+    if isinstance(heartbeat, dict):
+        ts = heartbeat.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                heartbeat_age = int((datetime.utcnow() - datetime.fromisoformat(ts)).total_seconds())
+            except Exception:
+                heartbeat_age = -1
+        self_heal_probe_ok = bool(heartbeat.get("self_heal_probe_ok", False))
+        self_heal_healed = bool(heartbeat.get("self_heal_healed", False))
+
+    return {
+        "provider_name": provider_name,
+        "provider_state": provider_state,
+        "model_name": model_name,
+        "session_tokens": session_tokens,
+        "session_cost_usd": session_cost,
+        "today_cost_usd": today_cost,
+        "daily_limit_usd": daily_limit,
+        "daily_remaining_usd": daily_remaining,
+        "budget_status": budget_status,
+        "active_tasks": active_tasks,
+        "queue_depth": queue_depth,
+        "heartbeat_age_seconds": heartbeat_age,
+        "self_heal_probe_ok": self_heal_probe_ok,
+        "self_heal_healed": self_heal_healed,
+        "ollama_installed": ollama_installed,
+    }

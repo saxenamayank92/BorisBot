@@ -9,6 +9,7 @@ import time
 import re
 import httpx
 import socket
+from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
 from typing import Optional
@@ -18,13 +19,17 @@ from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHE
 from borisbot.failures import build_failure
 from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
+from borisbot.guide.server import run_guide_server
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
 from borisbot.browser.executor import BrowserExecutor
 from borisbot.browser.task_runner import TaskRunner
+from borisbot.llm.cost_guard import CostGuard
+from borisbot.llm.provider_health import get_provider_health_registry
 from borisbot.supervisor.browser_manager import BrowserManager
 from borisbot.supervisor.capability_manager import CapabilityManager
 from borisbot.supervisor.database import get_db
+from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
 from borisbot.supervisor.worker import Worker
 
 app = typer.Typer()
@@ -182,6 +187,119 @@ def record(
 ):
     """Record workflow actions and replay immediately for validation."""
     asyncio.run(run_record(task_id, start_url=start_url))
+
+
+@app.command()
+def guide(
+    host: str = typer.Option("127.0.0.1", "--host", help="Guide server host"),
+    port: int = typer.Option(7788, "--port", help="Guide server port"),
+    open_browser: bool = typer.Option(True, "--open-browser/--no-open-browser"),
+):
+    """Launch guided local web UI for record/replay/release-check actions."""
+    run_guide_server(Path.cwd(), host=host, port=port, open_browser=open_browser)
+
+
+@app.command("cleanup-browsers")
+def cleanup_browsers():
+    """Force-remove orphan browser containers and reset running session rows."""
+    asyncio.run(BrowserManager().cleanup_orphan_containers())
+    typer.echo("Browser session cleanup complete.")
+
+
+async def _build_session_status(agent_id: str, model_name: str) -> dict:
+    """Assemble deterministic runtime budget and health snapshot."""
+    cost_guard = CostGuard()
+    budget = await cost_guard.get_budget_status(agent_id)
+    session_start = await cost_guard.get_runtime_session_started_at()
+    session_usage = await cost_guard.get_usage_window(start_iso=session_start)
+    day_start, day_end = cost_guard._utc_day_bounds()
+    today_usage = await cost_guard.get_usage_window(start_iso=day_start, end_iso=day_end)
+
+    active_tasks = 0
+    queue_depth = 0
+    async for db in get_db():
+        cursor = await db.execute("SELECT COUNT(*) AS count FROM tasks WHERE status = 'running'")
+        row = await cursor.fetchone()
+        active_tasks = int(row["count"] if row else 0)
+
+        cursor = await db.execute("SELECT COUNT(*) AS count FROM task_queue")
+        row = await cursor.fetchone()
+        queue_depth = int(row["count"] if row else 0)
+        break
+
+    provider_name = "ollama"
+    provider_state = "unknown"
+    try:
+        response = httpx.get(f"{SUPERVISOR_URL}/metrics/providers", timeout=2.0)
+        payload = response.json() if response.status_code == 200 else {}
+        if isinstance(payload, dict):
+            provider_snapshot = payload.get(provider_name, {})
+            if isinstance(provider_snapshot, dict):
+                provider_state = str(provider_snapshot.get("state", provider_state))
+    except Exception:
+        provider_snapshot = get_provider_health_registry().get_snapshot().get(provider_name, {})
+        if isinstance(provider_snapshot, dict):
+            provider_state = str(provider_snapshot.get("state", provider_state))
+
+    return {
+        "provider_name": provider_name,
+        "provider_state": provider_state,
+        "model_name": model_name,
+        "session_tokens": int(session_usage.get("total_tokens", 0)),
+        "session_cost_usd": float(session_usage.get("cost_usd", 0.0)),
+        "today_cost_usd": float(today_usage.get("cost_usd", 0.0)),
+        "daily_limit_usd": float(budget["daily_limit"]),
+        "daily_remaining_usd": float(budget["daily_remaining"]),
+        "budget_status": str(budget["status"]).upper(),
+        "active_tasks": active_tasks,
+        "queue_depth": queue_depth,
+        "heartbeat_timestamp": "",
+        "heartbeat_age_seconds": -1,
+    }
+
+
+@app.command("session-status")
+def session_status(
+    agent_id: str = typer.Option("default", "--agent-id", help="Agent id for budget status"),
+    model_name: str = typer.Option(
+        os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b"),
+        "--model-name",
+        help="Primary model label to display",
+    ),
+):
+    """Print deterministic provider, token, and budget status snapshot."""
+    snapshot = asyncio.run(_build_session_status(agent_id=agent_id, model_name=model_name))
+    heartbeat = read_heartbeat_snapshot()
+    if isinstance(heartbeat, dict):
+        ts = heartbeat.get("timestamp")
+        if isinstance(ts, str):
+            snapshot["heartbeat_timestamp"] = ts
+            try:
+                age = int((datetime.utcnow() - datetime.fromisoformat(ts)).total_seconds())
+                snapshot["heartbeat_age_seconds"] = max(age, 0)
+            except Exception:
+                snapshot["heartbeat_age_seconds"] = -1
+        snapshot["self_heal_probe_ok"] = bool(heartbeat.get("self_heal_probe_ok", False))
+        snapshot["self_heal_healed"] = bool(heartbeat.get("self_heal_healed", False))
+    typer.echo(f"Provider: {snapshot['provider_name']}:{snapshot['model_name']}")
+    typer.echo(f"Health: {snapshot['provider_state']}")
+    typer.echo(f"Session tokens: {snapshot['session_tokens']:,}")
+    typer.echo(f"Session cost: ${snapshot['session_cost_usd']:.2f}")
+    typer.echo(f"Today cost: ${snapshot['today_cost_usd']:.2f} / ${snapshot['daily_limit_usd']:.2f}")
+    typer.echo(f"Budget remaining: ${snapshot['daily_remaining_usd']:.2f}")
+    typer.echo(f"Budget status: {snapshot['budget_status']}")
+    typer.echo(f"Active tasks: {snapshot['active_tasks']}")
+    typer.echo(f"Queue depth: {snapshot['queue_depth']}")
+    if snapshot["heartbeat_age_seconds"] >= 0:
+        typer.echo(f"Heartbeat: alive (last seen {snapshot['heartbeat_age_seconds']}s ago)")
+    else:
+        typer.echo("Heartbeat: unknown")
+    if snapshot.get("self_heal_healed"):
+        typer.echo("Self-heal: recovered provider in latest heartbeat")
+    elif snapshot.get("self_heal_probe_ok"):
+        typer.echo("Self-heal: probe OK")
+    else:
+        typer.echo("Self-heal: probe failed or unavailable")
 
 
 class _ReplayRouter:

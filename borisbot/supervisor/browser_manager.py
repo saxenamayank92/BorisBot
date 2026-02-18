@@ -24,6 +24,11 @@ VNC_CONTAINER_PORT = 5900
 NOVNC_CONTAINER_PORT = 6080
 
 
+def build_novnc_url(host_port: int) -> str:
+    """Return direct noVNC URL that opens the client and auto-connects."""
+    return f"http://localhost:{host_port}/vnc.html?autoconnect=1&resize=remote&reconnect=1"
+
+
 class BrowserManager:
     """Coordinates browser session allocation and lifecycle for agents."""
 
@@ -191,6 +196,8 @@ class BrowserManager:
                 )
 
         await self.expire_stale_sessions()
+        # Reconcile crashed/dead sessions before enforcing max running limit.
+        await self.health_check_sessions()
 
         running_sessions = await self._count_running_sessions()
         if running_sessions >= MAX_BROWSER_SESSIONS:
@@ -338,7 +345,7 @@ class BrowserManager:
             "cdp_port": cdp_host_port,
             "vnc_port": vnc_host_port,
             "novnc_port": novnc_host_port,
-            "vnc_url": f"http://localhost:{novnc_host_port}",
+            "vnc_url": build_novnc_url(novnc_host_port),
         }
 
     async def expire_stale_sessions(self) -> None:
@@ -415,9 +422,10 @@ class BrowserManager:
                 logger.info("Docker stop stdout: %s", stop_result.stdout.strip())
             if stop_result.stderr:
                 logger.info("Docker stop stderr: %s", stop_result.stderr.strip())
-            if stop_result.returncode != 0:
+            stderr = (stop_result.stderr or "").strip()
+            if stop_result.returncode != 0 and "No such container" not in stderr:
                 raise RuntimeError(
-                    f"Failed to stop browser container {container_name}: {stop_result.stderr.strip()}"
+                    f"Failed to stop browser container {container_name}: {stderr}"
                 )
 
             await db.execute(

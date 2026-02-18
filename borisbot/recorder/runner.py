@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import signal
 from pathlib import Path
 from uuid import uuid4
@@ -23,6 +24,21 @@ logger = logging.getLogger("borisbot.recorder.runner")
 INJECTOR_JS = Path(__file__).parent / "injector.js"
 
 
+def _choose_recording_port(preferred_port: int = 7331) -> int:
+    """Return an available localhost port, preferring the default recorder port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", preferred_port))
+            return preferred_port
+        except OSError:
+            pass
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 async def run_record(
     task_id: str,
     start_url: str,
@@ -30,7 +46,8 @@ async def run_record(
 ) -> dict:
     """Record a workflow and immediately replay it through TaskRunner."""
     session = RecordingSession(task_id=task_id, start_url=start_url)
-    server = RecordingServer(session=session, port=7331)
+    recorder_port = _choose_recording_port()
+    server = RecordingServer(session=session, port=recorder_port)
     await server.start()
 
     manager = BrowserManager()
@@ -63,7 +80,7 @@ async def run_record(
         injector_code = INJECTOR_JS.read_text(encoding="utf-8")
         injector_code = (
             "window.__BORIS_RECORD_HOST__ = 'host.docker.internal';\n"
-            "window.__BORIS_RECORD_PORT__ = 7331;\n"
+            f"window.__BORIS_RECORD_PORT__ = {recorder_port};\n"
             f"{injector_code}"
         )
         await page.context.add_init_script(injector_code)
