@@ -1812,8 +1812,20 @@ def _render_html(workflows: list[str]) -> str:
       padding: 16px;
       box-shadow: 0 5px 20px rgba(30, 42, 47, 0.06);
     }}
-    .step {{ margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }}
-    .step:first-child {{ border-top: 0; margin-top: 0; padding-top: 0; }}
+    .step {{
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid #e8dece;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fffdf8 0%, #fff8ed 100%);
+      transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+    }}
+    .step:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 12px 22px rgba(54, 85, 100, 0.12);
+      border-color: #c6b9a2;
+    }}
+    .step:first-child {{ margin-top: 0; }}
     .step h3 {{ margin: 0 0 6px; font-size: 17px; letter-spacing: 0.02em; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }}
     button {{
@@ -1824,6 +1836,11 @@ def _render_html(workflows: list[str]) -> str:
       cursor: pointer;
       background: var(--brand);
       color: #fff;
+      transition: transform 140ms ease, filter 140ms ease;
+    }}
+    button:hover {{
+      transform: translateY(-1px);
+      filter: brightness(1.05);
     }}
     button.secondary {{ background: var(--brand-2); }}
     label {{ display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }}
