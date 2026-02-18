@@ -146,6 +146,7 @@ ACTION_TOOL_MAP = {
     "policy_safe_local": TOOL_SHELL,
     "policy_web_readonly": TOOL_SHELL,
     "policy_automation": TOOL_SHELL,
+    "policy_apply": TOOL_SHELL,
 }
 
 
@@ -1123,6 +1124,12 @@ def build_action_command(
     if action == "policy_automation":
         agent = params.get("agent_id", "").strip() or "default"
         return [python_bin, "-m", "borisbot.cli", "policy-apply", "--policy", "automation", "--agent-id", agent]
+    if action == "policy_apply":
+        agent = params.get("agent_id", "").strip() or "default"
+        policy = params.get("policy_name", "").strip().lower() or "safe-local"
+        if policy not in {"safe-local", "web-readonly", "automation"}:
+            raise ValueError("policy_name must be one of: safe-local, web-readonly, automation")
+        return [python_bin, "-m", "borisbot.cli", "policy-apply", "--policy", policy, "--agent-id", agent]
     if action == "record":
         task_id = params.get("task_id", "").strip() or "wf_new"
         start_url = params.get("start_url", "").strip() or "https://example.com"
@@ -2133,9 +2140,12 @@ def _render_html(workflows: list[str]) -> str:
           <div id="permission-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;"></div>
           <div class="actions">
             <button class="secondary" onclick="refreshPermissions()">Refresh Permissions</button>
-            <button class="secondary" onclick="runAction('policy_safe_local')">Apply Safe-Local</button>
-            <button class="secondary" onclick="runAction('policy_web_readonly')">Apply Web-Readonly</button>
-            <button class="secondary" onclick="runAction('policy_automation')">Apply Automation</button>
+            <select id="policy-pack" style="min-width:190px;">
+              <option value="safe-local">safe-local</option>
+              <option value="web-readonly">web-readonly</option>
+              <option value="automation">automation</option>
+            </select>
+            <button class="secondary" onclick="applySelectedPolicy()">Apply Policy Pack</button>
           </div>
         </div>
 
@@ -2250,6 +2260,8 @@ def _render_html(workflows: list[str]) -> str:
         agent_id: document.getElementById('agent').value,
         start_url: document.getElementById('start').value,
         model_name: document.getElementById('model').value
+        ,
+        policy_name: document.getElementById('policy-pack') ? document.getElementById('policy-pack').value : 'safe-local'
       }};
     }}
 
@@ -2374,6 +2386,13 @@ def _render_html(workflows: list[str]) -> str:
       }}
       refreshRuntimeStatus();
       refreshPermissions();
+    }}
+
+    async function applySelectedPolicy() {{
+      const data = await runAction('policy_apply');
+      if (data && data.job_id) {{
+        document.getElementById('meta').textContent = 'Applying policy pack...';
+      }}
     }}
 
     async function showOllamaSetupPlan() {{

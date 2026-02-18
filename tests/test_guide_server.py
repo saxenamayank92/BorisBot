@@ -125,6 +125,16 @@ class GuideServerCommandTests(unittest.TestCase):
             cmd,
             [sys.executable, "-m", "borisbot.cli", "policy-apply", "--policy", "safe-local", "--agent-id", "default"],
         )
+        cmd_apply = build_action_command(
+            "policy_apply",
+            {"agent_id": "default", "policy_name": "automation"},
+            workspace=Path.cwd(),
+            python_bin=sys.executable,
+        )
+        self.assertEqual(
+            cmd_apply,
+            [sys.executable, "-m", "borisbot.cli", "policy-apply", "--policy", "automation", "--agent-id", "default"],
+        )
 
     def test_session_status_command(self) -> None:
         cmd = build_action_command(
@@ -188,6 +198,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(required_tool_for_action("llm_setup"), "shell")
         self.assertEqual(required_tool_for_action("bootstrap_setup"), "shell")
         self.assertEqual(required_tool_for_action("doctor"), "shell")
+        self.assertEqual(required_tool_for_action("policy_apply"), "shell")
         self.assertEqual(required_tool_for_action("policy_automation"), "shell")
         self.assertIsNone(required_tool_for_action("unknown_action"))
 
@@ -667,8 +678,9 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("renderTraceSummary(trace)", html)
         self.assertIn("Export Support Bundle", html)
         self.assertIn("exportSupportBundle()", html)
-        self.assertIn("Apply Safe-Local", html)
-        self.assertIn("policy_safe_local", html)
+        self.assertIn("Apply Policy Pack", html)
+        self.assertIn("policy-pack", html)
+        self.assertIn("applySelectedPolicy()", html)
         self.assertIn("Run Bootstrap Setup", html)
         self.assertIn("runBootstrapSetup()", html)
         self.assertIn("Run Doctor", html)
