@@ -34,6 +34,9 @@ borisbot golden-check
 
 # Run CLI planner dry-run preview
 borisbot plan-preview "Open example.com and read page title" --provider ollama
+
+# Show provider readiness matrix in CLI
+borisbot provider-status
 ```
 
 Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step cards to:
