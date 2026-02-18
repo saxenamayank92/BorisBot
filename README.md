@@ -33,6 +33,20 @@ borisbot llm-setup --model llama3.2:3b --json
 
 # Show provider/token/budget runtime status
 borisbot session-status
+# JSON status snapshot (provider-aware)
+borisbot session-status --json
+
+# Detailed spend + budget snapshot
+borisbot budget-status --agent-id default
+# Update budget limits
+borisbot budget-set --system-daily-limit-usd 10 --agent-daily-limit-usd 5 --monthly-limit-usd 100
+
+# Trace inspection from guide runtime
+borisbot trace-list
+borisbot trace-show trace_00001 --json
+
+# Export support diagnostics bundle
+borisbot support-bundle
 
 # Run golden planner regression suite
 borisbot golden-check
@@ -70,9 +84,10 @@ Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step
 - Planner dry-run and chat: send natural-language prompts, get validated `planner.v1` preview, token estimate, provider-aware cost estimate, required permissions, and persistent per-agent chat history.
 - Assistant-to-planner handoff: convert assistant trace output into a planner prompt draft; review and run dry-run before execution.
 - Budget safety: dry-run planner is blocked when budget state is `blocked`.
+- Budget controls: CLI + guide support budget status inspection and runtime limit updates.
 - Runtime provider panel: GUI shows per-provider enabled/configured/usable state with quick diagnostics.
 - Provider connectivity check: GUI button `Test Primary Provider` runs an immediate probe for current provider credentials/connectivity.
-- Trace auditability: inspect compact trace list, open full trace detail, and export trace JSON.
+- Trace auditability: inspect compact trace list, open full trace detail, export trace JSON, and export support bundles.
 
 ## Recorder Error Guidance
 
