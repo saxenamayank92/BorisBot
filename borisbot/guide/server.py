@@ -2065,6 +2065,12 @@ def _render_html(workflows: list[str]) -> str:
     }}
     .viewer-toolbar button.mode {{
       background: #5d7f8e;
+      box-shadow: 0 8px 14px rgba(93, 127, 142, 0.25);
+    }}
+    .viewer-toolbar button.mode.active {{
+      background: linear-gradient(135deg, #365564, #284652);
+      box-shadow: 0 10px 18px rgba(40, 70, 82, 0.33);
+      transform: translateY(-1px);
     }}
     .viewer-grid {{
       display: grid;
@@ -2328,9 +2334,9 @@ def _render_html(workflows: list[str]) -> str:
         <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
         <a class="browser-link" id="browser-link" href="#" target="_blank" style="display:none;"></a>
         <div class="viewer-toolbar">
-          <button class="mode" onclick="setViewMode('terminal')">Terminal View</button>
-          <button class="mode" onclick="setViewMode('browser')">Browser View</button>
-          <button class="mode" onclick="setViewMode('split')">Split View</button>
+          <button class="mode" data-mode="terminal" onclick="setViewMode('terminal')">Terminal View</button>
+          <button class="mode" data-mode="browser" onclick="setViewMode('browser')">Browser View</button>
+          <button class="mode" data-mode="split" onclick="setViewMode('split')">Split View</button>
           <button onclick="maximizePane('terminal-pane')">Maximize Terminal</button>
           <button onclick="maximizePane('browser-pane')">Maximize Browser</button>
         </div>
@@ -3106,6 +3112,11 @@ def _render_html(workflows: list[str]) -> str:
       const grid = document.getElementById('viewer-grid');
       grid.classList.remove('mode-terminal', 'mode-browser', 'mode-split');
       grid.classList.add('mode-' + mode);
+      const modeButtons = document.querySelectorAll('.viewer-toolbar button.mode');
+      for (const button of modeButtons) {{
+        const buttonMode = button.getAttribute('data-mode');
+        button.classList.toggle('active', buttonMode === mode);
+      }}
       const terminalPane = document.getElementById('terminal-pane');
       const browserPane = document.getElementById('browser-pane');
       terminalPane.classList.toggle('hidden', mode === 'browser');
