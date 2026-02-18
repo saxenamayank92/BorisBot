@@ -224,7 +224,7 @@ def _provider_is_usable(provider_name: str) -> tuple[bool, str]:
         if shutil.which("ollama") is None:
             return False, "ollama_not_installed"
         return True, ""
-    if provider in {"google", "azure"}:
+    if provider in {"azure"}:
         return False, "transport_unimplemented"
     status = get_secret_status().get(provider, {})
     if not bool(status.get("configured", False)):
@@ -334,6 +334,48 @@ def _generate_plan_raw_with_anthropic(user_intent: str, model_name: str) -> str:
     return text
 
 
+def _generate_plan_raw_with_google(user_intent: str, model_name: str) -> str:
+    """Call Google Gemini generateContent endpoint and return text output."""
+    api_key = get_provider_secret("google")
+    if not api_key:
+        raise ValueError("Google API key missing. Configure it in Provider Onboarding.")
+    prompt = _build_planner_prompt(user_intent)
+    endpoint = os.getenv("BORISBOT_GOOGLE_API_BASE", "https://generativelanguage.googleapis.com").rstrip("/")
+    response = httpx.post(
+        f"{endpoint}/v1beta/models/{model_name}:generateContent",
+        params={"key": api_key},
+        json={
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0},
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Google generate failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Google response payload invalid")
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("Google response missing candidates")
+    first = candidates[0]
+    if not isinstance(first, dict):
+        raise ValueError("Google candidate invalid")
+    content = first.get("content")
+    if not isinstance(content, dict):
+        raise ValueError("Google content invalid")
+    parts = content.get("parts")
+    if not isinstance(parts, list) or not parts:
+        raise ValueError("Google content parts missing")
+    part0 = parts[0]
+    if not isinstance(part0, dict):
+        raise ValueError("Google content part invalid")
+    text = part0.get("text")
+    if not isinstance(text, str):
+        raise ValueError("Google response text missing")
+    return text
+
+
 def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[bool, str]:
     provider = str(provider_name).strip().lower()
     if provider == "ollama":
@@ -367,6 +409,19 @@ def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[boo
         if response.status_code != 200:
             return False, f"anthropic probe failed: HTTP {response.status_code}"
         return True, f"anthropic reachable ({model_name})"
+    if provider == "google":
+        api_key = get_provider_secret("google")
+        if not api_key:
+            return False, "Google API key missing"
+        endpoint = os.getenv("BORISBOT_GOOGLE_API_BASE", "https://generativelanguage.googleapis.com").rstrip("/")
+        response = httpx.get(
+            f"{endpoint}/v1beta/models",
+            params={"key": api_key},
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            return False, f"google probe failed: HTTP {response.status_code}"
+        return True, f"google reachable ({model_name})"
     return False, f"provider '{provider}' probe not implemented"
 
 
@@ -378,6 +433,8 @@ def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model
         return _generate_plan_raw_with_openai(user_intent, model_name=model_name)
     if provider == "anthropic":
         return _generate_plan_raw_with_anthropic(user_intent, model_name=model_name)
+    if provider == "google":
+        return _generate_plan_raw_with_google(user_intent, model_name=model_name)
     raise ValueError(f"Provider '{provider}' planner transport is not enabled in this build")
 
 
@@ -2172,7 +2229,7 @@ def _collect_runtime_status(python_bin: str) -> dict:
             configured = ollama_installed
             usable = enabled and ollama_installed
             reason = "" if usable else "ollama_not_installed"
-        elif provider in {"google", "azure"}:
+        elif provider in {"azure"}:
             configured = bool(secret_status.get(provider, {}).get("configured", False))
             usable = False
             reason = "transport_unimplemented" if enabled else "disabled"
