@@ -31,6 +31,9 @@ borisbot session-status
 
 # Run golden planner regression suite
 borisbot golden-check
+
+# Run CLI planner dry-run preview
+borisbot plan-preview "Open example.com and read page title" --provider ollama
 ```
 
 Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step cards to:
@@ -47,6 +50,7 @@ Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step
 - Permission matrix: set per-agent `prompt|allow|deny` for `browser`, `filesystem`, `shell`, `web_fetch`, and `scheduler`.
 - Planner dry-run and chat: send natural-language prompts, get validated `planner.v1` preview, token estimate, provider-aware cost estimate, required permissions, and persistent per-agent chat history.
 - Budget safety: dry-run planner is blocked when budget state is `blocked`.
+- Runtime provider panel: GUI shows per-provider enabled/configured/usable state with quick diagnostics.
 - Trace auditability: inspect compact trace list, open full trace detail, and export trace JSON.
 
 ## Recorder Error Guidance
