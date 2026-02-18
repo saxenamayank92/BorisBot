@@ -10,7 +10,7 @@ from unittest import mock
 
 import typer
 
-from borisbot.cli import _load_and_validate_workflow, lint_workflow, release_check
+from borisbot.cli import _load_and_validate_workflow, lint_workflow, plan_preview, release_check
 from borisbot.cli import _compute_lint_violations
 from borisbot.cli import _format_record_runtime_error
 
@@ -193,6 +193,35 @@ class CliWorkflowContractTests(unittest.TestCase):
     def test_format_record_runtime_error_session_limit(self) -> None:
         msg = _format_record_runtime_error(RuntimeError("Maximum browser sessions reached"))
         self.assertIn("cleanup-browsers", msg)
+
+    def test_plan_preview_human_ok(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_dry_run_preview",
+            return_value={
+                "status": "ok",
+                "provider_name": "ollama",
+                "validated_commands": [{"id": "1", "action": "get_title", "params": {}}],
+                "token_estimate": {"total_tokens": 42},
+                "cost_estimate_usd": 0.0,
+            },
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                plan_preview("test prompt", json_output=False)
+            text = output.getvalue()
+            self.assertIn("PLAN PREVIEW: OK", text)
+            self.assertIn("provider: ollama", text)
+
+    def test_plan_preview_json_fail_exits_nonzero(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_dry_run_preview",
+            return_value={"status": "failed", "error_code": "LLM_PROVIDER_UNHEALTHY"},
+        ):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    plan_preview("test prompt", json_output=True)
+            self.assertEqual(cm.exception.exit_code, 1)
 
 
 if __name__ == "__main__":

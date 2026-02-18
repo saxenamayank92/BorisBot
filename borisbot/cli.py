@@ -19,7 +19,7 @@ from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHE
 from borisbot.failures import build_failure
 from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
-from borisbot.guide.server import run_guide_server
+from borisbot.guide.server import _build_dry_run_preview, run_guide_server
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
 from borisbot.browser.executor import BrowserExecutor
@@ -223,6 +223,52 @@ def guide(
 ):
     """Launch guided local web UI for record/replay/release-check actions."""
     run_guide_server(Path.cwd(), host=host, port=port, open_browser=open_browser)
+
+
+@app.command("plan-preview")
+def plan_preview(
+    prompt: str,
+    agent_id: str = typer.Option("default", "--agent-id"),
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+    provider_name: str = typer.Option("ollama", "--provider"),
+    json_output: bool = typer.Option(False, "--json", help="Print full JSON preview payload"),
+):
+    """Run planner dry-run preview from CLI with provider fallback metadata."""
+    preview = _build_dry_run_preview(
+        prompt,
+        agent_id=agent_id,
+        model_name=model_name,
+        provider_name=provider_name,
+    )
+    if json_output:
+        typer.echo(json.dumps(preview, indent=2))
+        if preview.get("status") != "ok":
+            raise typer.Exit(code=1)
+        return
+
+    if preview.get("status") != "ok":
+        typer.echo("PLAN PREVIEW: FAIL")
+        typer.echo(f"  error: {preview.get('error_code', 'UNKNOWN')}")
+        attempts = preview.get("provider_attempts", [])
+        if isinstance(attempts, list) and attempts:
+            first = attempts[0]
+            if isinstance(first, dict):
+                typer.echo(
+                    f"  provider_attempt: {first.get('provider', 'unknown')} ({first.get('status', 'unknown')})"
+                )
+        raise typer.Exit(code=1)
+
+    token_est = preview.get("token_estimate", {})
+    total_tokens = int(token_est.get("total_tokens", 0)) if isinstance(token_est, dict) else 0
+    cost = float(preview.get("cost_estimate_usd", 0.0))
+    provider_selected = str(preview.get("provider_name", "unknown"))
+    commands = preview.get("validated_commands", [])
+    command_count = len(commands) if isinstance(commands, list) else 0
+    typer.echo("PLAN PREVIEW: OK")
+    typer.echo(f"  provider: {provider_selected}")
+    typer.echo(f"  commands: {command_count}")
+    typer.echo(f"  tokens_est: {total_tokens}")
+    typer.echo(f"  cost_est_usd: ${cost:.4f}")
 
 
 @app.command("cleanup-browsers")
