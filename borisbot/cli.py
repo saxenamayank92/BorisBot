@@ -19,7 +19,7 @@ from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHE
 from borisbot.failures import build_failure
 from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
-from borisbot.guide.server import _build_dry_run_preview, run_guide_server
+from borisbot.guide.server import _build_dry_run_preview, _collect_runtime_status, run_guide_server
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
 from borisbot.browser.executor import BrowserExecutor
@@ -269,6 +269,36 @@ def plan_preview(
     typer.echo(f"  commands: {command_count}")
     typer.echo(f"  tokens_est: {total_tokens}")
     typer.echo(f"  cost_est_usd: ${cost:.4f}")
+
+
+@app.command("provider-status")
+def provider_status(
+    json_output: bool = typer.Option(False, "--json", help="Print provider matrix as JSON"),
+):
+    """Print provider readiness matrix from runtime status snapshot."""
+    status = _collect_runtime_status(sys.executable)
+    matrix = status.get("provider_matrix", {})
+    if json_output:
+        typer.echo(json.dumps({"provider_name": status.get("provider_name"), "provider_matrix": matrix}, indent=2))
+        return
+    typer.echo("PROVIDER STATUS")
+    primary = str(status.get("provider_name", "unknown"))
+    typer.echo(f"  primary: {primary}")
+    if not isinstance(matrix, dict) or not matrix:
+        typer.echo("  providers: none")
+        return
+    for name in sorted(matrix.keys()):
+        row = matrix.get(name, {})
+        if not isinstance(row, dict):
+            continue
+        enabled = bool(row.get("enabled", False))
+        configured = bool(row.get("configured", False))
+        usable = bool(row.get("usable", False))
+        reason = str(row.get("reason", "")).strip()
+        suffix = f" ({reason})" if reason else ""
+        typer.echo(
+            f"  - {name}: enabled={str(enabled).lower()} configured={str(configured).lower()} usable={str(usable).lower()}{suffix}"
+        )
 
 
 @app.command("cleanup-browsers")

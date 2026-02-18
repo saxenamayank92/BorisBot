@@ -10,7 +10,7 @@ from unittest import mock
 
 import typer
 
-from borisbot.cli import _load_and_validate_workflow, lint_workflow, plan_preview, release_check
+from borisbot.cli import _load_and_validate_workflow, lint_workflow, plan_preview, provider_status, release_check
 from borisbot.cli import _compute_lint_violations
 from borisbot.cli import _format_record_runtime_error
 
@@ -222,6 +222,24 @@ class CliWorkflowContractTests(unittest.TestCase):
                 with redirect_stdout(output):
                     plan_preview("test prompt", json_output=True)
             self.assertEqual(cm.exception.exit_code, 1)
+
+    def test_provider_status_human(self) -> None:
+        with mock.patch(
+            "borisbot.cli._collect_runtime_status",
+            return_value={
+                "provider_name": "ollama",
+                "provider_matrix": {
+                    "ollama": {"enabled": True, "configured": True, "usable": True, "reason": ""},
+                    "openai": {"enabled": True, "configured": False, "usable": False, "reason": "api_key_missing"},
+                },
+            },
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                provider_status(json_output=False)
+            text = output.getvalue()
+            self.assertIn("PROVIDER STATUS", text)
+            self.assertIn("openai", text)
 
 
 if __name__ == "__main__":
