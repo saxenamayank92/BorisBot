@@ -498,6 +498,10 @@ def release_check(
     verify_summary = _summarize_verify_output(
         verify_result["stdout"], verify_result["stderr"], verify_result["returncode"]
     )
+    golden_result = _run_golden_suite()
+    golden_summary = _summarize_verify_output(
+        golden_result["stdout"], golden_result["stderr"], golden_result["returncode"]
+    )
 
     workflow_outputs = []
     has_lint_failure = False
@@ -527,9 +531,12 @@ def release_check(
         workflow_outputs.append(item)
 
     verify_failed = verify_result["returncode"] != 0
+    golden_failed = golden_result["returncode"] != 0
     release_output = {
         "verify_status": "ok" if not verify_failed else "failed",
         "verify": verify_summary,
+        "golden_status": "ok" if not golden_failed else "failed",
+        "golden": golden_summary,
         "workflows": workflow_outputs,
     }
     if has_lint_failure:
@@ -544,13 +551,22 @@ def release_check(
             url="",
             message=verify_summary.get("status", "verify suite failed"),
         )
+    if golden_failed and not release_output.get("failure"):
+        release_output["failure"] = build_failure(
+            error_class="interaction_failed",
+            error_code="GOLDEN_SUITE_FAILED",
+            step_id="golden",
+            selector="",
+            url="",
+            message=golden_summary.get("status", "golden suite failed"),
+        )
 
     if json_output:
         typer.echo(json.dumps(release_output, indent=2))
     else:
         _print_release_check_human(release_output)
 
-    if has_lint_failure or verify_failed:
+    if has_lint_failure or verify_failed or golden_failed:
         raise typer.Exit(code=1)
 
 
@@ -626,6 +642,17 @@ def _run_verify_suite() -> dict:
     }
 
 
+def _run_golden_suite() -> dict:
+    """Run golden regression suite and return structured subprocess result."""
+    cmd = [sys.executable, "-m", "unittest", "-v", "tests.test_golden_planner_regression"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
 def _summarize_verify_output(stdout: str, stderr: str, returncode: int) -> dict:
     """Extract concise verify summary from unittest output."""
     combined = f"{stdout or ''}\n{stderr or ''}"
@@ -639,14 +666,17 @@ def _summarize_verify_output(stdout: str, stderr: str, returncode: int) -> dict:
 def _print_release_check_human(release_output: dict) -> None:
     """Print compact release-check summary for humans."""
     verify = release_output.get("verify", {})
+    golden = release_output.get("golden", {})
     workflows = release_output.get("workflows", [])
     failed_workflows = [item for item in workflows if item.get("status") == "failed"]
     verify_failed = release_output.get("verify_status") != "ok"
-    overall_failed = verify_failed or bool(failed_workflows)
+    golden_failed = release_output.get("golden_status") != "ok"
+    overall_failed = verify_failed or golden_failed or bool(failed_workflows)
 
     if not overall_failed:
         typer.echo("RELEASE CHECK: PASS")
         typer.echo(f"  tests: {verify.get('passed', 0)}/{verify.get('total', 0)}")
+        typer.echo(f"  golden: {golden.get('passed', 0)}/{golden.get('total', 0)}")
         typer.echo(f"  workflows: {len(workflows)}/{len(workflows)}")
         return
 
@@ -655,6 +685,11 @@ def _print_release_check_human(release_output: dict) -> None:
         typer.echo(
             f"  tests: {verify.get('passed', 0)}/{verify.get('total', 0)} "
             "(verify suite failed)"
+        )
+    if golden_failed:
+        typer.echo(
+            f"  golden: {golden.get('passed', 0)}/{golden.get('total', 0)} "
+            "(golden suite failed)"
         )
     for item in failed_workflows:
         workflow_name = Path(item.get("workflow_path", "")).name or item.get("workflow_path", "")

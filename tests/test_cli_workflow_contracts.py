@@ -99,6 +99,9 @@ class CliWorkflowContractTests(unittest.TestCase):
         with mock.patch(
             "borisbot.cli._run_verify_suite",
             return_value={"returncode": 0, "stdout": "", "stderr": ""},
+        ), mock.patch(
+            "borisbot.cli._run_golden_suite",
+            return_value={"returncode": 0, "stdout": "Ran 1 tests\n\nOK\n", "stderr": ""},
         ):
             output = io.StringIO()
             with self.assertRaises(typer.Exit) as cm:
@@ -129,6 +132,9 @@ class CliWorkflowContractTests(unittest.TestCase):
         with mock.patch(
             "borisbot.cli._run_verify_suite",
             return_value={"returncode": 0, "stdout": "Ran 17 tests\n\nOK\n", "stderr": ""},
+        ), mock.patch(
+            "borisbot.cli._run_golden_suite",
+            return_value={"returncode": 0, "stdout": "Ran 1 tests\n\nOK\n", "stderr": ""},
         ):
             output = io.StringIO()
             with self.assertRaises(typer.Exit):
@@ -142,6 +148,40 @@ class CliWorkflowContractTests(unittest.TestCase):
             text = output.getvalue()
             self.assertIn("RELEASE CHECK: FAIL", text)
             self.assertIn("Workflow:", text)
+
+    def test_release_check_json_includes_golden_status(self) -> None:
+        workflow_path = self._write_workflow(
+            {
+                "schema_version": "task_command.v1",
+                "task_id": "wf_golden",
+                "commands": [
+                    {
+                        "id": "1",
+                        "action": "click",
+                        "params": {"selector": "[data-testid=\"submit\"]"},
+                    }
+                ],
+            }
+        )
+        with mock.patch(
+            "borisbot.cli._run_verify_suite",
+            return_value={"returncode": 0, "stdout": "Ran 17 tests\n\nOK\n", "stderr": ""},
+        ), mock.patch(
+            "borisbot.cli._run_golden_suite",
+            return_value={"returncode": 0, "stdout": "Ran 1 tests\n\nOK\n", "stderr": ""},
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                release_check(
+                    [workflow_path],
+                    min_average_score=0.0,
+                    max_fragile=999,
+                    max_high_risk=999,
+                    json_output=True,
+                )
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["golden_status"], "ok")
+            self.assertIn("golden", payload)
 
 
 if __name__ == "__main__":
