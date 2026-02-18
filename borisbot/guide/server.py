@@ -25,6 +25,7 @@ import httpx
 
 from borisbot.llm.errors import LLMInvalidOutputError
 from borisbot.llm.planner_contract import parse_planner_output
+from borisbot.llm.planner_validator import validate_and_convert_plan
 from borisbot.llm.cost_guard import CostGuard
 from borisbot.llm.provider_health import get_provider_health_registry
 from borisbot.supervisor.database import get_db
@@ -204,6 +205,17 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str) -> dict:
         }
 
     required_tools = _extract_required_tools_from_plan(parsed)
+    try:
+        preview_commands = validate_and_convert_plan(parsed)
+    except LLMInvalidOutputError as exc:
+        return {
+            "status": "failed",
+            "error_class": exc.error_class,
+            "error_code": exc.error_code,
+            "message": str(exc),
+            "planner_output": parsed,
+            "raw_output": raw_output,
+        }
     required_permissions = [
         {
             "tool_name": tool,
@@ -217,6 +229,7 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str) -> dict:
     return {
         "status": "ok",
         "planner_output": parsed,
+        "validated_commands": preview_commands,
         "required_permissions": required_permissions,
         "token_estimate": {
             "input_tokens": prompt_tokens,

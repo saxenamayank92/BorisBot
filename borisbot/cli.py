@@ -566,6 +566,19 @@ def verify():
         raise typer.Exit(code=result["returncode"])
 
 
+@app.command("golden-check")
+def golden_check():
+    """Run golden planner regression suite."""
+    cmd = [sys.executable, "-m", "unittest", "-v", "tests.test_golden_planner_regression"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        typer.echo(result.stdout.rstrip())
+    if result.stderr:
+        typer.echo(result.stderr.rstrip(), err=True)
+    if result.returncode != 0:
+        raise typer.Exit(code=result.returncode)
+
+
 def _load_and_validate_workflow(workflow_path: Path) -> dict:
     """Load a workflow JSON file and enforce supported schema contract."""
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))

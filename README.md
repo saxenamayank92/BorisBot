@@ -28,6 +28,9 @@ borisbot guide
 
 # Show provider/token/budget runtime status
 borisbot session-status
+
+# Run golden planner regression suite
+borisbot golden-check
 ```
 
 Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step cards to:

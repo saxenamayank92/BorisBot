@@ -1,0 +1,19 @@
+[
+  {
+    "name": "basic_navigate_and_click",
+    "raw_output": "{\"planner_schema_version\":\"planner.v1\",\"intent\":\"open page and click login\",\"proposed_actions\":[{\"action\":\"navigate\",\"target\":\"https://example.com\",\"input\":\"\"},{\"action\":\"click\",\"target\":\"#login\",\"input\":\"\"}]}",
+    "expected_commands": [
+      {"id": "1", "action": "navigate", "params": {"url": "https://example.com"}},
+      {"id": "2", "action": "click", "params": {"selector": "#login"}}
+    ]
+  },
+  {
+    "name": "type_and_submit",
+    "raw_output": "{\"planner_schema_version\":\"planner.v1\",\"intent\":\"fill form\",\"proposed_actions\":[{\"action\":\"type\",\"target\":\"#email\",\"input\":\"user@example.com\"},{\"action\":\"click\",\"target\":\"#submit\",\"input\":\"\"}]}",
+    "expected_commands": [
+      {"id": "1", "action": "type", "params": {"selector": "#email", "text": "user@example.com"}},
+      {"id": "2", "action": "click", "params": {"selector": "#submit"}}
+    ]
+  }
+]
+
