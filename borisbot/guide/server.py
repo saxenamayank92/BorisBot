@@ -1903,44 +1903,105 @@ def _render_html(workflows: list[str]) -> str:
   <title>BorisBot Guide</title>
   <style>
     :root {{
-      --bg: #f4efe7;
-      --panel: #fffaf1;
-      --ink: #1e2a2f;
-      --muted: #5f6a6d;
-      --brand: #0d6e6e;
-      --brand-2: #d67443;
-      --border: #dacfbf;
+      --bg: #f2efe8;
+      --bg-alt: #ece6dc;
+      --panel: #fffaf0;
+      --panel-strong: #fffdf8;
+      --ink: #1f2a32;
+      --muted: #5a6770;
+      --brand: #0e6760;
+      --brand-2: #cb7448;
+      --accent: #9a7a58;
+      --border: #d9ccb7;
+      --line-soft: rgba(111, 89, 64, 0.16);
+      --shadow-soft: 0 18px 40px rgba(24, 33, 40, 0.08);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      font-family: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
       color: var(--ink);
-      background: radial-gradient(circle at 20% 10%, #fffdf6 0%, var(--bg) 55%);
+      background:
+        radial-gradient(circle at 12% 8%, #fffdf7 0%, transparent 40%),
+        radial-gradient(circle at 88% 0%, #efe7da 0%, transparent 36%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-alt) 100%);
+      position: relative;
     }}
-    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
-    h1 {{ margin: 0 0 8px; font-size: 30px; letter-spacing: 0.2px; }}
+    body::before {{
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(120deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0) 40%),
+        repeating-linear-gradient(
+          135deg,
+          rgba(154, 122, 88, 0.03) 0,
+          rgba(154, 122, 88, 0.03) 10px,
+          rgba(255, 255, 255, 0) 10px,
+          rgba(255, 255, 255, 0) 20px
+        );
+    }}
+    .wrap {{ max-width: 1240px; margin: 0 auto; padding: 28px 24px 36px; }}
+    .hero {{
+      border: 1px solid var(--line-soft);
+      border-radius: 18px;
+      padding: 18px 18px 16px;
+      background: linear-gradient(145deg, rgba(255, 250, 241, 0.86), rgba(255, 253, 249, 0.76));
+      backdrop-filter: blur(6px);
+      box-shadow: var(--shadow-soft);
+      margin-bottom: 14px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 34px;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+      letter-spacing: 0.01em;
+      line-height: 1.08;
+    }}
     p {{ margin: 0; color: var(--muted); }}
-    .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; align-items: start; }}
+    .hero-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }}
+    .chip {{
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: rgba(255, 255, 255, 0.64);
+      color: #40505a;
+      font-size: 12px;
+      letter-spacing: 0.02em;
+    }}
+    .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 16px; align-items: start; }}
     .card {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 16px;
+      background: linear-gradient(180deg, var(--panel-strong) 0%, var(--panel) 100%);
+      border: 1px solid var(--line-soft);
+      border-radius: 18px;
       padding: 16px;
-      box-shadow: 0 5px 20px rgba(30, 42, 47, 0.06);
+      box-shadow: var(--shadow-soft);
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+    }}
+    .card:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 24px 44px rgba(24, 33, 40, 0.11);
+      border-color: rgba(124, 97, 67, 0.28);
     }}
     .step {{
       margin-top: 12px;
       padding: 12px;
-      border: 1px solid #e8dece;
+      border: 1px solid #e8dcc7;
       border-radius: 14px;
-      background: linear-gradient(180deg, #fffdf8 0%, #fff8ed 100%);
+      background: linear-gradient(160deg, #fffefb 0%, #fff9ef 52%, #fff4e6 100%);
       transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
     }}
     .step:hover {{
-      transform: translateY(-1px);
-      box-shadow: 0 12px 22px rgba(54, 85, 100, 0.12);
-      border-color: #c6b9a2;
+      transform: translateY(-2px);
+      box-shadow: 0 16px 30px rgba(54, 85, 100, 0.13);
+      border-color: #c3b193;
     }}
     .step:first-child {{ margin-top: 0; }}
     .step h3 {{ margin: 0 0 6px; font-size: 17px; letter-spacing: 0.02em; }}
@@ -1951,30 +2012,40 @@ def _render_html(workflows: list[str]) -> str:
       padding: 9px 12px;
       font-weight: 600;
       cursor: pointer;
-      background: var(--brand);
+      background: linear-gradient(135deg, var(--brand), #0c5650);
       color: #fff;
-      transition: transform 140ms ease, filter 140ms ease;
+      transition: transform 140ms ease, filter 140ms ease, box-shadow 140ms ease;
+      box-shadow: 0 8px 14px rgba(14, 103, 96, 0.24);
     }}
     button:hover {{
       transform: translateY(-1px);
       filter: brightness(1.05);
+      box-shadow: 0 12px 20px rgba(14, 103, 96, 0.26);
     }}
-    button.secondary {{ background: var(--brand-2); }}
+    button.secondary {{
+      background: linear-gradient(135deg, var(--brand-2), #b16137);
+      box-shadow: 0 8px 14px rgba(203, 116, 72, 0.24);
+    }}
     label {{ display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }}
     input, select {{
       width: 100%;
-      border: 1px solid var(--border);
+      border: 1px solid #d8ccb7;
       border-radius: 10px;
       padding: 9px;
       font-size: 14px;
-      background: #fff;
+      background: rgba(255, 255, 255, 0.92);
       color: var(--ink);
       margin-bottom: 10px;
     }}
+    input:focus, select:focus, textarea:focus {{
+      outline: none;
+      border-color: #b18a62;
+      box-shadow: 0 0 0 3px rgba(177, 138, 98, 0.15);
+    }}
     pre {{
       margin: 0;
-      background: #111a1f;
-      color: #d9f5eb;
+      background: linear-gradient(180deg, #101a21, #0f171d);
+      color: #dff6ec;
       border-radius: 12px;
       padding: 12px;
       min-height: 300px;
@@ -2005,10 +2076,10 @@ def _render_html(workflows: list[str]) -> str:
     .viewer-grid.mode-split {{ grid-template-rows: 1fr 1fr; }}
     .pane {{
       min-height: 0;
-      border: 1px solid var(--border);
+      border: 1px solid var(--line-soft);
       border-radius: 12px;
       overflow: hidden;
-      background: #fff;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), #fbf7ef);
       display: flex;
       flex-direction: column;
     }}
@@ -2016,8 +2087,8 @@ def _render_html(workflows: list[str]) -> str:
       padding: 8px 10px;
       font-size: 12px;
       color: var(--muted);
-      border-bottom: 1px solid var(--border);
-      background: #fff7ea;
+      border-bottom: 1px solid var(--line-soft);
+      background: linear-gradient(90deg, #fff7ea 0%, #fff3e2 100%);
     }}
     .pane-body {{
       flex: 1;
@@ -2072,20 +2143,29 @@ def _render_html(workflows: list[str]) -> str:
       background: #fff2e6;
     }}
     .provider-card {{
-      border: 1px solid var(--border);
+      border: 1px solid var(--line-soft);
       border-radius: 10px;
       padding: 8px;
+      background: linear-gradient(170deg, rgba(255,255,255,0.88), rgba(255,252,246,0.82));
     }}
     .job-meta {{ font-size: 13px; color: var(--muted); margin-bottom: 8px; }}
     @media (max-width: 920px) {{
       .layout {{ grid-template-columns: 1fr; }}
+      h1 {{ font-size: 30px; }}
     }}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>BorisBot Guided Validation</h1>
-    <p>Use this checklist UI to run reliability actions without memorizing CLI commands.</p>
+    <div class="hero">
+      <h1>BorisBot Guided Validation</h1>
+      <p>Use this checklist UI to run reliability actions without memorizing CLI commands.</p>
+      <div class="hero-meta">
+        <span class="chip">Local-first runtime</span>
+        <span class="chip">Deterministic executor</span>
+        <span class="chip">Cost and permission guardrails</span>
+      </div>
+    </div>
 
     <div class="layout">
       <section class="card">
