@@ -31,6 +31,9 @@ This document defines versioned contracts that are treated as stable runtime int
 
 Notes:
 - `fallback_selectors` in `params` is optional and only used when replay is run with `--allow-fallback`.
+- Optional `idempotency_key` on submitted task payload enables retry-safe enqueue semantics:
+  - same key + same payload hash => deduplicated task response
+  - same key + different payload hash => idempotency conflict
 
 ## Task Result Contract
 

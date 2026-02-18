@@ -122,6 +122,18 @@ MIGRATIONS: list[tuple[str, str]] = [
         """,
     ),
     (
+        "20260218_create_task_idempotency",
+        """
+        CREATE TABLE IF NOT EXISTS task_idempotency (
+            idempotency_key TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         "20260217_create_system_settings",
         """
         CREATE TABLE IF NOT EXISTS system_settings (

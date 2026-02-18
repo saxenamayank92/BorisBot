@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+import hashlib
 from typing import Any, Dict
 from datetime import datetime
 import uuid
@@ -31,6 +32,31 @@ class TaskRequest(BaseModel):
 
 
 router = APIRouter()
+
+
+def _extract_idempotency_key(task: Dict[str, Any]) -> str | None:
+    """Return optional idempotency key from task payload."""
+    key = task.get("idempotency_key")
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    return None
+
+
+def _payload_hash(task: Dict[str, Any]) -> str:
+    """Compute deterministic SHA256 hash for task payload."""
+    normalized = json.dumps(task, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _resolve_idempotency(existing_row: dict | None, *, agent_id: str, payload_hash: str) -> str:
+    """Return idempotency resolution: miss|hit|conflict."""
+    if existing_row is None:
+        return "miss"
+    if str(existing_row.get("agent_id")) != agent_id:
+        return "conflict"
+    if str(existing_row.get("payload_hash")) != payload_hash:
+        return "conflict"
+    return "hit"
 
 
 def _extract_cloud_model_metadata(task: Dict[str, Any]) -> str | None:
@@ -66,6 +92,8 @@ async def create_task(request: TaskRequest):
     queue_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat()
     payload_json = json.dumps(task)
+    idempotency_key = _extract_idempotency_key(task)
+    payload_hash = _payload_hash(task) if idempotency_key else None
 
     try:
         # Deterministic task execution uses browser runtime by contract.
@@ -86,6 +114,39 @@ async def create_task(request: TaskRequest):
                 ) from exc
 
         async for db in get_db():
+            existing_idempotency_row: dict | None = None
+            if idempotency_key and payload_hash:
+                cursor = await db.execute(
+                    """
+                    SELECT idempotency_key, agent_id, payload_hash, task_id
+                    FROM task_idempotency
+                    WHERE idempotency_key = ?
+                    """,
+                    (idempotency_key,),
+                )
+                row = await cursor.fetchone()
+                existing_idempotency_row = dict(row) if row else None
+                resolution = _resolve_idempotency(
+                    existing_idempotency_row,
+                    agent_id=agent_id,
+                    payload_hash=payload_hash,
+                )
+                if resolution == "hit":
+                    return {
+                        "task_id": str(existing_idempotency_row["task_id"]),
+                        "status": "deduplicated",
+                        "deduplicated": True,
+                    }
+                if resolution == "conflict":
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "idempotency_conflict",
+                            "reason": "idempotency key already exists with different task payload",
+                            "idempotency_key": idempotency_key,
+                        },
+                    )
+
             try:
                 await db.execute(
                     """
@@ -104,6 +165,48 @@ async def create_task(request: TaskRequest):
                 """,
                 (queue_id, task_id, now, None, None),
             )
+            if idempotency_key and payload_hash:
+                try:
+                    await db.execute(
+                        """
+                        INSERT INTO task_idempotency (
+                            idempotency_key, agent_id, payload_hash, task_id, created_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (idempotency_key, agent_id, payload_hash, task_id, now),
+                    )
+                except sqlite3.IntegrityError:
+                    cursor = await db.execute(
+                        """
+                        SELECT idempotency_key, agent_id, payload_hash, task_id
+                        FROM task_idempotency
+                        WHERE idempotency_key = ?
+                        """,
+                        (idempotency_key,),
+                    )
+                    row = await cursor.fetchone()
+                    existing = dict(row) if row else None
+                    resolution = _resolve_idempotency(
+                        existing,
+                        agent_id=agent_id,
+                        payload_hash=payload_hash,
+                    )
+                    if resolution == "hit":
+                        await db.rollback()
+                        return {
+                            "task_id": str(existing["task_id"]) if existing else task_id,
+                            "status": "deduplicated",
+                            "deduplicated": True,
+                        }
+                    await db.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "idempotency_conflict",
+                            "reason": "idempotency key already exists with different task payload",
+                            "idempotency_key": idempotency_key,
+                        },
+                    )
             await db.commit()
             break
         return {"task_id": task_id, "status": "pending"}
