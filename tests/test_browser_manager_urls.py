@@ -2,7 +2,7 @@
 
 import unittest
 
-from borisbot.supervisor.browser_manager import build_novnc_url
+from borisbot.supervisor.browser_manager import _is_missing_container_error, build_novnc_url
 
 
 class BrowserManagerUrlTests(unittest.TestCase):
@@ -15,7 +15,10 @@ class BrowserManagerUrlTests(unittest.TestCase):
             "http://localhost:6080/vnc.html?autoconnect=1&resize=remote&reconnect=1",
         )
 
+    def test_is_missing_container_error(self) -> None:
+        self.assertTrue(_is_missing_container_error("Error: No such container: abc"))
+        self.assertFalse(_is_missing_container_error("permission denied"))
+
 
 if __name__ == "__main__":
     unittest.main()
-

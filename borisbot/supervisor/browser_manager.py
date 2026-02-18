@@ -29,6 +29,11 @@ def build_novnc_url(host_port: int) -> str:
     return f"http://localhost:{host_port}/vnc.html?autoconnect=1&resize=remote&reconnect=1"
 
 
+def _is_missing_container_error(stderr: str) -> bool:
+    """Return True when docker stderr indicates the container does not exist."""
+    return "no such container" in (stderr or "").strip().lower()
+
+
 class BrowserManager:
     """Coordinates browser session allocation and lifecycle for agents."""
 
@@ -227,7 +232,7 @@ class BrowserManager:
             logger.info("Docker pre-clean stdout: %s", preclean_result.stdout.strip())
         if preclean_result.stderr:
             logger.info("Docker pre-clean stderr: %s", preclean_result.stderr.strip())
-        if preclean_result.returncode != 0 and "No such container" not in preclean_result.stderr:
+        if preclean_result.returncode != 0 and not _is_missing_container_error(preclean_result.stderr):
             raise RuntimeError(
                 f"Failed pre-clean for browser container {container_name}: "
                 f"{preclean_result.stderr.strip()}"
@@ -423,9 +428,18 @@ class BrowserManager:
             if stop_result.stderr:
                 logger.info("Docker stop stderr: %s", stop_result.stderr.strip())
             stderr = (stop_result.stderr or "").strip()
-            if stop_result.returncode != 0 and "No such container" not in stderr:
+            if stop_result.returncode != 0 and not _is_missing_container_error(stderr):
                 raise RuntimeError(
                     f"Failed to stop browser container {container_name}: {stderr}"
+                )
+            session_status = "stopped"
+            if stop_result.returncode != 0 and _is_missing_container_error(stderr):
+                session_status = "crashed"
+            rm_result = await self._run_command(["docker", "rm", "-f", container_name])
+            rm_stderr = (rm_result.stderr or "").strip()
+            if rm_result.returncode != 0 and not _is_missing_container_error(rm_stderr):
+                raise RuntimeError(
+                    f"Failed to remove browser container {container_name}: {rm_stderr}"
                 )
 
             await db.execute(
@@ -434,7 +448,7 @@ class BrowserManager:
                 SET status = ?, last_health_check = ?
                 WHERE id = ?
                 """,
-                ("stopped", now, session_row["id"]),
+                (session_status, now, session_row["id"]),
             )
             await db.commit()
             logger.info(
