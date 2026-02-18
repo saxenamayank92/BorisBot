@@ -17,6 +17,7 @@ from borisbot.cli import (
     chat_history,
     llm_setup,
     lint_workflow,
+    policy_apply,
     plan_preview,
     permissions,
     provider_status,
@@ -405,6 +406,68 @@ class CliWorkflowContractTests(unittest.TestCase):
                 set_permission(tool_name="assistant", decision="maybe", agent_id="default")
         self.assertEqual(cm.exception.exit_code, 1)
         self.assertIn("unsupported decision", output.getvalue())
+
+    def test_policy_apply_unknown_policy_fails(self) -> None:
+        output = io.StringIO()
+        with self.assertRaises(typer.Exit) as cm:
+            with redirect_stdout(output):
+                policy_apply(policy_name="nope", agent_id="default", json_output=False)
+        self.assertEqual(cm.exception.exit_code, 1)
+        self.assertIn("UNKNOWN_POLICY", output.getvalue())
+
+    def test_policy_apply_updates_profile_and_permissions(self) -> None:
+        base_profile = {
+            "schema_version": "profile.v2",
+            "agent_name": "default",
+            "primary_provider": "ollama",
+            "provider_chain": ["ollama"],
+            "model_name": "llama3.2:3b",
+            "provider_settings": {
+                "ollama": {"enabled": True, "model_name": ""},
+                "openai": {"enabled": False, "model_name": ""},
+                "anthropic": {"enabled": False, "model_name": ""},
+                "google": {"enabled": False, "model_name": ""},
+                "azure": {"enabled": False, "model_name": ""},
+            },
+        }
+        with mock.patch("borisbot.cli.load_profile", return_value=base_profile.copy()), mock.patch(
+            "borisbot.cli.save_profile",
+            side_effect=lambda profile: profile,
+        ) as save_profile_mock, mock.patch(
+            "borisbot.cli.set_agent_tool_permission_sync"
+        ) as set_perm:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                policy_apply(policy_name="automation", agent_id="default", json_output=False)
+            self.assertIn("POLICY APPLY: OK", output.getvalue())
+            save_profile_mock.assert_called_once()
+            self.assertGreaterEqual(set_perm.call_count, 1)
+
+    def test_policy_apply_json_output(self) -> None:
+        base_profile = {
+            "schema_version": "profile.v2",
+            "agent_name": "default",
+            "primary_provider": "ollama",
+            "provider_chain": ["ollama"],
+            "model_name": "llama3.2:3b",
+            "provider_settings": {
+                "ollama": {"enabled": True, "model_name": ""},
+                "openai": {"enabled": False, "model_name": ""},
+                "anthropic": {"enabled": False, "model_name": ""},
+                "google": {"enabled": False, "model_name": ""},
+                "azure": {"enabled": False, "model_name": ""},
+            },
+        }
+        with mock.patch("borisbot.cli.load_profile", return_value=base_profile.copy()), mock.patch(
+            "borisbot.cli.save_profile",
+            side_effect=lambda profile: profile,
+        ), mock.patch("borisbot.cli.set_agent_tool_permission_sync"):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                policy_apply(policy_name="safe-local", agent_id="default", json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["policy"], "safe-local")
 
     def test_llm_setup_fails_when_missing_without_auto_install(self) -> None:
         with mock.patch("borisbot.cli.shutil.which", return_value=None):

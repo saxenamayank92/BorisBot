@@ -47,12 +47,19 @@ from borisbot.supervisor.browser_manager import BrowserManager
 from borisbot.supervisor.capability_manager import CapabilityManager
 from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
+from borisbot.supervisor.profile_config import load_profile, save_profile
 from borisbot.supervisor.tool_permissions import (
     ALLOWED_DECISIONS,
     ALLOWED_TOOLS,
     DECISION_ALLOW,
+    DECISION_DENY,
     DECISION_PROMPT,
     TOOL_ASSISTANT,
+    TOOL_BROWSER,
+    TOOL_FILESYSTEM,
+    TOOL_SCHEDULER,
+    TOOL_SHELL,
+    TOOL_WEB_FETCH,
     get_agent_permission_matrix_sync,
     get_agent_tool_permission_sync,
     set_agent_tool_permission_sync,
@@ -69,6 +76,54 @@ LOG_DIR = BORISBOT_DIR / "logs"
 SUPERVISOR_HOST = "127.0.0.1"
 SUPERVISOR_PORT = 7777
 SUPERVISOR_URL = f"http://{SUPERVISOR_HOST}:{SUPERVISOR_PORT}"
+
+POLICY_PACKS: dict[str, dict[str, object]] = {
+    "safe-local": {
+        "profile": {
+            "primary_provider": "ollama",
+            "provider_chain": ["ollama"],
+            "provider_settings_enabled": {"ollama": True},
+        },
+        "permissions": {
+            TOOL_ASSISTANT: DECISION_ALLOW,
+            TOOL_BROWSER: DECISION_PROMPT,
+            TOOL_FILESYSTEM: DECISION_PROMPT,
+            TOOL_SHELL: DECISION_PROMPT,
+            TOOL_WEB_FETCH: DECISION_DENY,
+            TOOL_SCHEDULER: DECISION_DENY,
+        },
+    },
+    "web-readonly": {
+        "profile": {
+            "primary_provider": "ollama",
+            "provider_chain": ["ollama", "openai"],
+            "provider_settings_enabled": {"ollama": True, "openai": True},
+        },
+        "permissions": {
+            TOOL_ASSISTANT: DECISION_ALLOW,
+            TOOL_BROWSER: DECISION_ALLOW,
+            TOOL_FILESYSTEM: DECISION_PROMPT,
+            TOOL_SHELL: DECISION_DENY,
+            TOOL_WEB_FETCH: DECISION_ALLOW,
+            TOOL_SCHEDULER: DECISION_DENY,
+        },
+    },
+    "automation": {
+        "profile": {
+            "primary_provider": "ollama",
+            "provider_chain": ["ollama", "openai"],
+            "provider_settings_enabled": {"ollama": True, "openai": True},
+        },
+        "permissions": {
+            TOOL_ASSISTANT: DECISION_ALLOW,
+            TOOL_BROWSER: DECISION_ALLOW,
+            TOOL_FILESYSTEM: DECISION_ALLOW,
+            TOOL_SHELL: DECISION_ALLOW,
+            TOOL_WEB_FETCH: DECISION_ALLOW,
+            TOOL_SCHEDULER: DECISION_ALLOW,
+        },
+    },
+}
 
 def ensure_dirs():
     BORISBOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -716,6 +771,92 @@ def set_permission(
     typer.echo(f"  agent: {agent}")
     typer.echo(f"  tool: {tool}")
     typer.echo(f"  decision: {value}")
+
+
+@app.command("policy-apply")
+def policy_apply(
+    policy_name: str = typer.Option(..., "--policy"),
+    agent_id: str = typer.Option("default", "--agent-id"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Apply preset profile + permission policy pack."""
+    if not isinstance(policy_name, str):
+        policy_name = ""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(json_output, bool):
+        json_output = False
+
+    policy = policy_name.strip().lower()
+    agent = agent_id.strip() or "default"
+    pack = POLICY_PACKS.get(policy)
+    if not isinstance(pack, dict):
+        allowed = ", ".join(sorted(POLICY_PACKS.keys()))
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"status": "failed", "error": "UNKNOWN_POLICY", "allowed_policies": sorted(POLICY_PACKS.keys())},
+                    indent=2,
+                )
+            )
+        else:
+            typer.echo("POLICY APPLY: FAIL")
+            typer.echo(f"  error: UNKNOWN_POLICY ({policy})")
+            typer.echo(f"  allowed: {allowed}")
+        raise typer.Exit(code=1)
+
+    profile = load_profile()
+    profile_config = pack.get("profile", {})
+    if not isinstance(profile_config, dict):
+        profile_config = {}
+    provider_chain = profile_config.get("provider_chain", ["ollama"])
+    primary_provider = str(profile_config.get("primary_provider", "ollama")).strip().lower() or "ollama"
+    provider_settings_enabled = profile_config.get("provider_settings_enabled", {})
+    if not isinstance(provider_settings_enabled, dict):
+        provider_settings_enabled = {}
+
+    provider_settings = profile.get("provider_settings", {})
+    if not isinstance(provider_settings, dict):
+        provider_settings = {}
+    for name, row in provider_settings.items():
+        if not isinstance(row, dict):
+            continue
+        row["enabled"] = bool(provider_settings_enabled.get(name, False))
+    profile["provider_chain"] = provider_chain
+    profile["primary_provider"] = primary_provider
+    profile["provider_settings"] = provider_settings
+    saved_profile = save_profile(profile)
+
+    permissions = pack.get("permissions", {})
+    if not isinstance(permissions, dict):
+        permissions = {}
+    applied_permissions: dict[str, str] = {}
+    for tool_name, decision in permissions.items():
+        if tool_name not in ALLOWED_TOOLS:
+            continue
+        value = str(decision).strip().lower()
+        if value not in ALLOWED_DECISIONS:
+            continue
+        set_agent_tool_permission_sync(agent, tool_name, value)
+        applied_permissions[tool_name] = value
+
+    payload = {
+        "status": "ok",
+        "policy": policy,
+        "agent_id": agent,
+        "provider_chain": saved_profile.get("provider_chain", []),
+        "primary_provider": saved_profile.get("primary_provider", "ollama"),
+        "permissions": applied_permissions,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo("POLICY APPLY: OK")
+    typer.echo(f"  policy: {policy}")
+    typer.echo(f"  agent: {agent}")
+    typer.echo(f"  primary_provider: {payload['primary_provider']}")
+    typer.echo(f"  provider_chain: {', '.join(payload['provider_chain'])}")
+    typer.echo(f"  permissions_applied: {len(applied_permissions)}")
 
 
 @app.command("provider-status")
