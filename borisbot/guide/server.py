@@ -1952,10 +1952,12 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('session_status')">Session Status</button>
             <button class="secondary" onclick="showOllamaSetupPlan()">Show Setup Plan</button>
             <button onclick="runPlanPreview()">Dry-Run Planner</button>
+            <button class="secondary" onclick="approveRequiredPermissions()">Approve Required Permissions</button>
             <button onclick="executeApprovedPlan()">Execute Approved Plan</button>
             <button onclick="saveProfile()">Save Profile</button>
           </div>
           <pre id="ollama-setup-plan" style="margin-top:8px;min-height:70px;"></pre>
+          <pre id="plan-permissions" style="margin-top:8px;min-height:70px;">No plan permissions yet.</pre>
         </div>
 
         <div class="step">
@@ -2072,6 +2074,7 @@ def _render_html(workflows: list[str]) -> str:
     let viewMode = 'split';
     let lastPlanTraceId = null;
     let lastAssistantTraceId = null;
+    let lastRequiredPermissions = [];
     let chatHistory = [];
     let assistantHistory = [];
     const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
@@ -2411,12 +2414,69 @@ def _render_html(workflows: list[str]) -> str:
       const data = await response.json();
       if (!response.ok) {{
         document.getElementById('plan-output').textContent = 'Dry-run failed: ' + (data.error || 'unknown error');
+        renderRequiredPermissions([]);
         lastPlanTraceId = null;
         return;
       }}
       lastPlanTraceId = data.trace_id || null;
       document.getElementById('plan-output').textContent = JSON.stringify(data, null, 2);
+      renderRequiredPermissions(data.required_permissions || []);
       refreshTraces();
+    }}
+
+    function renderRequiredPermissions(requiredPermissions) {{
+      const rows = Array.isArray(requiredPermissions) ? requiredPermissions : [];
+      lastRequiredPermissions = rows.map(item => {{
+        if (!item || typeof item !== 'object') return {{ tool_name: '', decision: 'prompt' }};
+        return {{
+          tool_name: String(item.tool_name || '').trim(),
+          decision: String(item.decision || 'prompt').trim().toLowerCase(),
+        }};
+      }}).filter(item => !!item.tool_name);
+      if (!lastRequiredPermissions.length) {{
+        document.getElementById('plan-permissions').textContent = 'No plan permissions yet.';
+        return;
+      }}
+      const pending = lastRequiredPermissions.filter(item => item.decision !== 'allow');
+      const lines = [
+        `Required permissions: ${{lastRequiredPermissions.length}}`,
+        `Pending approvals: ${{pending.length}}`,
+        '',
+      ];
+      for (const item of lastRequiredPermissions) {{
+        lines.push(`[${{item.decision}}] ${{item.tool_name}}`);
+      }}
+      document.getElementById('plan-permissions').textContent = lines.join('\\n');
+    }}
+
+    async function approveRequiredPermissions() {{
+      if (!lastRequiredPermissions.length) {{
+        document.getElementById('meta').textContent = 'No required permissions to approve. Run Dry-Run Planner first.';
+        return;
+      }}
+      const agentId = document.getElementById('agent').value || 'default';
+      const pending = lastRequiredPermissions.filter(item => item.decision === 'prompt');
+      if (!pending.length) {{
+        document.getElementById('meta').textContent = 'Required permissions already approved.';
+        return;
+      }}
+      for (const item of pending) {{
+        const response = await fetch('/api/permissions', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{agent_id: agentId, tool_name: item.tool_name, decision: 'allow'}})
+        }});
+        if (!response.ok) {{
+          const data = await response.json().catch(() => ({{}}));
+          document.getElementById('meta').textContent = 'Permission update failed: ' + (data.error || item.tool_name);
+          return;
+        }}
+      }}
+      document.getElementById('meta').textContent = `Approved ${{pending.length}} required permission(s).`;
+      await refreshPermissions();
+      if (lastPlanTraceId) {{
+        await runPlanPreview();
+      }}
     }}
 
     function renderChatHistory() {{
@@ -2524,6 +2584,7 @@ def _render_html(workflows: list[str]) -> str:
         required_permissions: data.required_permissions || [],
         commands: (data.validated_commands || []).map(c => c.action),
       }};
+      renderRequiredPermissions(data.required_permissions || []);
       const plannerText = JSON.stringify(summary, null, 2);
       chatHistory.push({{ role: 'planner', text: plannerText }});
       appendChatHistory('planner', plannerText);
