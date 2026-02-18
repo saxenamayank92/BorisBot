@@ -15,7 +15,7 @@ import time
 import webbrowser
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -123,6 +123,18 @@ def _build_ollama_setup_plan(
         "install_error": install_error,
     }
     return plan
+
+
+GUIDE_STATE_DIR = Path.home() / ".borisbot"
+GUIDE_WIZARD_STATE_FILE = GUIDE_STATE_DIR / "guide_wizard_state.json"
+
+WIZARD_STEP_DEFS = [
+    {"step_id": "docker_ready", "label": "Docker Running"},
+    {"step_id": "llm_ready", "label": "LLM Ready"},
+    {"step_id": "provider_ready", "label": "Primary Provider Reachable"},
+    {"step_id": "permissions_reviewed", "label": "Permissions Reviewed"},
+    {"step_id": "first_preview", "label": "First Dry-Run Preview"},
+]
 
 
 ACTION_TOOL_MAP = {
@@ -1208,9 +1220,233 @@ class GuideState:
         self.python_bin = python_bin
         self._jobs: dict[str, GuideJob] = {}
         self._traces: list[dict] = []
+        self._inbox_items: list[dict] = []
+        self._schedules: list[dict] = []
         self._lock = threading.Lock()
         self._counter = 0
         self._trace_counter = 0
+        self._inbox_counter = 0
+        self._schedule_counter = 0
+        self._wizard_state: dict = self._load_wizard_state()
+
+    def _load_wizard_state(self) -> dict:
+        GUIDE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        default_steps = [
+            {"step_id": row["step_id"], "label": row["label"], "completed": False}
+            for row in WIZARD_STEP_DEFS
+        ]
+        if not GUIDE_WIZARD_STATE_FILE.exists():
+            return {"updated_at": datetime.utcnow().isoformat(), "steps": default_steps}
+        try:
+            payload = json.loads(GUIDE_WIZARD_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {"updated_at": datetime.utcnow().isoformat(), "steps": default_steps}
+        if not isinstance(payload, dict):
+            return {"updated_at": datetime.utcnow().isoformat(), "steps": default_steps}
+        existing = payload.get("steps", [])
+        if not isinstance(existing, list):
+            existing = []
+        existing_map: dict[str, bool] = {}
+        for row in existing:
+            if not isinstance(row, dict):
+                continue
+            step_id = str(row.get("step_id", "")).strip()
+            if not step_id:
+                continue
+            existing_map[step_id] = bool(row.get("completed", False))
+        merged_steps = []
+        for row in WIZARD_STEP_DEFS:
+            step_id = row["step_id"]
+            merged_steps.append(
+                {
+                    "step_id": step_id,
+                    "label": row["label"],
+                    "completed": bool(existing_map.get(step_id, False)),
+                }
+            )
+        return {
+            "updated_at": str(payload.get("updated_at", datetime.utcnow().isoformat())),
+            "steps": merged_steps,
+        }
+
+    def _save_wizard_state_locked(self) -> None:
+        self._wizard_state["updated_at"] = datetime.utcnow().isoformat()
+        GUIDE_WIZARD_STATE_FILE.write_text(
+            json.dumps(self._wizard_state, indent=2),
+            encoding="utf-8",
+        )
+
+    def get_wizard_state(self) -> dict:
+        with self._lock:
+            steps = self._wizard_state.get("steps", [])
+            if not isinstance(steps, list):
+                steps = []
+            total = len(steps)
+            completed = sum(1 for row in steps if isinstance(row, dict) and bool(row.get("completed", False)))
+            return {
+                "updated_at": self._wizard_state.get("updated_at", ""),
+                "steps": steps,
+                "summary": {
+                    "completed": completed,
+                    "total": total,
+                    "progress_percent": int((completed / total) * 100) if total else 0,
+                },
+            }
+
+    def set_wizard_step(self, step_id: str, completed: bool) -> dict:
+        key = str(step_id).strip()
+        if not key:
+            raise ValueError("step_id is required")
+        with self._lock:
+            steps = self._wizard_state.get("steps", [])
+            if not isinstance(steps, list):
+                raise ValueError("wizard state corrupted")
+            found = False
+            for row in steps:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("step_id", "")) == key:
+                    row["completed"] = bool(completed)
+                    found = True
+                    break
+            if not found:
+                raise ValueError(f"unknown step_id '{key}'")
+            self._save_wizard_state_locked()
+            steps_out = list(steps)
+        total = len(steps_out)
+        done = sum(1 for row in steps_out if isinstance(row, dict) and bool(row.get("completed", False)))
+        return {
+            "updated_at": self._wizard_state.get("updated_at", ""),
+            "steps": steps_out,
+            "summary": {
+                "completed": done,
+                "total": total,
+                "progress_percent": int((done / total) * 100) if total else 0,
+            },
+        }
+
+    def list_inbox_items(self) -> list[dict]:
+        with self._lock:
+            items = list(reversed(self._inbox_items[-100:]))
+        return items
+
+    def add_inbox_item(self, intent: str, *, source: str = "manual", priority: str = "normal") -> dict:
+        text = str(intent).strip()
+        if not text:
+            raise ValueError("intent is required")
+        value = str(priority).strip().lower() or "normal"
+        if value not in {"low", "normal", "high"}:
+            raise ValueError("priority must be one of: low, normal, high")
+        with self._lock:
+            self._inbox_counter += 1
+            item = {
+                "item_id": f"inbox_{self._inbox_counter:05d}",
+                "intent": text,
+                "source": str(source).strip() or "manual",
+                "priority": value,
+                "status": "open",
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            self._inbox_items.append(item)
+            return item
+
+    def update_inbox_item(self, item_id: str, status: str) -> dict:
+        key = str(item_id).strip()
+        value = str(status).strip().lower()
+        if value not in {"open", "in_progress", "done", "archived"}:
+            raise ValueError("status must be one of: open, in_progress, done, archived")
+        with self._lock:
+            for item in self._inbox_items:
+                if str(item.get("item_id", "")) == key:
+                    item["status"] = value
+                    item["updated_at"] = datetime.utcnow().isoformat()
+                    return item
+        raise ValueError("inbox item not found")
+
+    def delete_inbox_item(self, item_id: str) -> bool:
+        key = str(item_id).strip()
+        with self._lock:
+            before = len(self._inbox_items)
+            self._inbox_items = [item for item in self._inbox_items if str(item.get("item_id", "")) != key]
+            return len(self._inbox_items) < before
+
+    def create_schedule(self, intent: str, interval_minutes: int, *, agent_id: str = "default") -> dict:
+        text = str(intent).strip()
+        if not text:
+            raise ValueError("intent is required")
+        if int(interval_minutes) <= 0:
+            raise ValueError("interval_minutes must be > 0")
+        now = datetime.utcnow()
+        with self._lock:
+            self._schedule_counter += 1
+            schedule = {
+                "schedule_id": f"sched_{self._schedule_counter:05d}",
+                "intent": text,
+                "agent_id": str(agent_id).strip() or "default",
+                "interval_minutes": int(interval_minutes),
+                "enabled": True,
+                "next_run_at": (now + timedelta(minutes=int(interval_minutes))).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "last_enqueued_at": "",
+            }
+            self._schedules.append(schedule)
+            return schedule
+
+    def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> dict:
+        key = str(schedule_id).strip()
+        with self._lock:
+            for row in self._schedules:
+                if str(row.get("schedule_id", "")) != key:
+                    continue
+                row["enabled"] = bool(enabled)
+                row["updated_at"] = datetime.utcnow().isoformat()
+                return row
+        raise ValueError("schedule not found")
+
+    def delete_schedule(self, schedule_id: str) -> bool:
+        key = str(schedule_id).strip()
+        with self._lock:
+            before = len(self._schedules)
+            self._schedules = [row for row in self._schedules if str(row.get("schedule_id", "")) != key]
+            return len(self._schedules) < before
+
+    def tick_schedules(self) -> int:
+        now = datetime.utcnow()
+        enqueued = 0
+        with self._lock:
+            for row in self._schedules:
+                if not bool(row.get("enabled", False)):
+                    continue
+                next_run_raw = str(row.get("next_run_at", "")).strip()
+                try:
+                    next_run = datetime.fromisoformat(next_run_raw)
+                except Exception:
+                    next_run = now + timedelta(minutes=int(row.get("interval_minutes", 1)))
+                if next_run > now:
+                    continue
+                self._inbox_counter += 1
+                item = {
+                    "item_id": f"inbox_{self._inbox_counter:05d}",
+                    "intent": str(row.get("intent", "")).strip(),
+                    "source": f"schedule:{row.get('schedule_id', '')}",
+                    "priority": "normal",
+                    "status": "open",
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                }
+                self._inbox_items.append(item)
+                row["last_enqueued_at"] = now.isoformat()
+                interval = int(row.get("interval_minutes", 1))
+                row["next_run_at"] = (now + timedelta(minutes=interval)).isoformat()
+                row["updated_at"] = now.isoformat()
+                enqueued += 1
+        return enqueued
+
+    def list_schedules(self) -> list[dict]:
+        with self._lock:
+            return list(reversed(self._schedules[-100:]))
 
     def workflows(self) -> list[str]:
         workflow_dir = self.workspace / "workflows"
@@ -1434,6 +1670,9 @@ def _build_support_bundle(state: GuideState, agent_id: str) -> dict:
         "runtime_status": state.runtime_status(),
         "profile": load_profile(),
         "permissions": get_agent_permission_matrix_sync(agent),
+        "wizard_state": state.get_wizard_state(),
+        "task_inbox": state.list_inbox_items()[:20],
+        "schedules": state.list_schedules()[:20],
         "trace_summaries": state.list_trace_summaries(),
         "recent_traces": traces[:5],
     }
@@ -1475,6 +1714,17 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/runtime-status":
                 self._json_response(state.runtime_status())
+                return
+            if self.path == "/api/wizard-state":
+                self._json_response(state.get_wizard_state())
+                return
+            if self.path == "/api/task-inbox":
+                state.tick_schedules()
+                self._json_response({"items": state.list_inbox_items()})
+                return
+            if self.path == "/api/schedules":
+                state.tick_schedules()
+                self._json_response({"items": state.list_schedules()})
                 return
             if self.path.startswith("/api/ollama-setup-plan"):
                 query = parse_qs(urlsplit(self.path).query)
@@ -1577,6 +1827,84 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self._json_response(profile, status=HTTPStatus.OK)
+                return
+            if self.path == "/api/wizard-state":
+                payload = self._read_json()
+                step_id = str(payload.get("step_id", "")).strip()
+                completed = bool(payload.get("completed", False))
+                try:
+                    wizard = state.set_wizard_step(step_id, completed)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(wizard, status=HTTPStatus.OK)
+                return
+            if self.path == "/api/task-inbox":
+                payload = self._read_json()
+                action = str(payload.get("action", "add")).strip().lower() or "add"
+                if action == "add":
+                    intent = str(payload.get("intent", "")).strip()
+                    priority = str(payload.get("priority", "normal")).strip().lower() or "normal"
+                    try:
+                        item = state.add_inbox_item(intent, source="manual", priority=priority)
+                    except ValueError as exc:
+                        self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    self._json_response({"status": "ok", "item": item, "items": state.list_inbox_items()}, status=HTTPStatus.OK)
+                    return
+                if action == "update":
+                    item_id = str(payload.get("item_id", "")).strip()
+                    status_value = str(payload.get("status", "open")).strip().lower() or "open"
+                    try:
+                        item = state.update_inbox_item(item_id, status_value)
+                    except ValueError as exc:
+                        self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    self._json_response({"status": "ok", "item": item, "items": state.list_inbox_items()}, status=HTTPStatus.OK)
+                    return
+                if action == "delete":
+                    item_id = str(payload.get("item_id", "")).strip()
+                    deleted = state.delete_inbox_item(item_id)
+                    if not deleted:
+                        self._json_response({"error": "item_not_found"}, status=HTTPStatus.NOT_FOUND)
+                        return
+                    self._json_response({"status": "ok", "items": state.list_inbox_items()}, status=HTTPStatus.OK)
+                    return
+                self._json_response({"error": "unsupported action"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if self.path == "/api/schedules":
+                payload = self._read_json()
+                action = str(payload.get("action", "create")).strip().lower() or "create"
+                if action == "create":
+                    intent = str(payload.get("intent", "")).strip()
+                    interval_minutes = int(payload.get("interval_minutes", 0) or 0)
+                    agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                    try:
+                        item = state.create_schedule(intent, interval_minutes, agent_id=agent_id)
+                    except ValueError as exc:
+                        self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    self._json_response({"status": "ok", "item": item, "items": state.list_schedules()}, status=HTTPStatus.OK)
+                    return
+                if action == "toggle":
+                    schedule_id = str(payload.get("schedule_id", "")).strip()
+                    enabled = bool(payload.get("enabled", False))
+                    try:
+                        item = state.set_schedule_enabled(schedule_id, enabled)
+                    except ValueError as exc:
+                        self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    self._json_response({"status": "ok", "item": item, "items": state.list_schedules()}, status=HTTPStatus.OK)
+                    return
+                if action == "delete":
+                    schedule_id = str(payload.get("schedule_id", "")).strip()
+                    deleted = state.delete_schedule(schedule_id)
+                    if not deleted:
+                        self._json_response({"error": "schedule_not_found"}, status=HTTPStatus.NOT_FOUND)
+                        return
+                    self._json_response({"status": "ok", "items": state.list_schedules()}, status=HTTPStatus.OK)
+                    return
+                self._json_response({"error": "unsupported action"}, status=HTTPStatus.BAD_REQUEST)
                 return
             if self.path == "/api/provider-secrets":
                 payload = self._read_json()
@@ -2154,6 +2482,29 @@ def _render_html(workflows: list[str]) -> str:
       padding: 8px;
       background: linear-gradient(170deg, rgba(255,255,255,0.88), rgba(255,252,246,0.82));
     }}
+    .inbox-list, .schedule-list, .wizard-list {{
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }}
+    .inbox-item, .schedule-item, .wizard-item {{
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      padding: 8px;
+      background: rgba(255, 255, 255, 0.8);
+      font-size: 13px;
+    }}
+    .mini-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 6px;
+    }}
+    .mini-actions button {{
+      padding: 6px 9px;
+      border-radius: 8px;
+      font-size: 12px;
+    }}
     .job-meta {{ font-size: 13px; color: var(--muted); margin-bottom: 8px; }}
     @media (max-width: 920px) {{
       .layout {{ grid-template-columns: 1fr; }}
@@ -2306,6 +2657,47 @@ def _render_html(workflows: list[str]) -> str:
           </div>
           <pre id="assistant-output" style="margin-top:8px;min-height:120px;max-height:220px;">No assistant responses yet.</pre>
         </div>
+
+        <div class="step">
+          <h3>First-Run Wizard</h3>
+          <p>Track onboarding progress and complete setup gates in order.</p>
+          <div class="actions">
+            <button class="secondary" onclick="refreshWizardState()">Refresh Wizard</button>
+          </div>
+          <div id="wizard-list" class="wizard-list"></div>
+        </div>
+
+        <div class="step">
+          <h3>Task Inbox</h3>
+          <p>Capture recurring intents and route them into planner flow.</p>
+          <label for="inbox-intent">New inbox intent</label>
+          <textarea id="inbox-intent" rows="2" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Check trending AI posts and summarize top 3."></textarea>
+          <label for="inbox-priority">Priority</label>
+          <select id="inbox-priority">
+            <option value="normal">normal</option>
+            <option value="high">high</option>
+            <option value="low">low</option>
+          </select>
+          <div class="actions">
+            <button onclick="addInboxItem()">Add Inbox Item</button>
+            <button class="secondary" onclick="refreshInbox()">Refresh Inbox</button>
+          </div>
+          <div id="inbox-list" class="inbox-list"></div>
+        </div>
+
+        <div class="step">
+          <h3>Scheduler</h3>
+          <p>Create recurring intents that automatically enqueue into Task Inbox.</p>
+          <label for="schedule-intent">Schedule intent</label>
+          <textarea id="schedule-intent" rows="2" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Daily LinkedIn feed scan and summary."></textarea>
+          <label for="schedule-interval">Interval (minutes)</label>
+          <input id="schedule-interval" value="60" />
+          <div class="actions">
+            <button onclick="createSchedule()">Create Schedule</button>
+            <button class="secondary" onclick="refreshSchedules()">Refresh Schedules</button>
+          </div>
+          <div id="schedule-list" class="schedule-list"></div>
+        </div>
       </section>
 
       <section class="card" id="viewer-card">
@@ -2409,6 +2801,9 @@ def _render_html(workflows: list[str]) -> str:
       if (action.startsWith('policy_')) {{
         refreshPermissions();
         refreshRuntimeStatus();
+      }}
+      if (action === 'doctor' || action === 'verify' || action === 'llm_setup' || action === 'bootstrap_setup') {{
+        refreshWizardState();
       }}
       startPolling();
       return data;
@@ -3214,6 +3609,208 @@ def _render_html(workflows: list[str]) -> str:
       }}
     }}
 
+    async function refreshWizardState() {{
+      try {{
+        const response = await fetch('/api/wizard-state');
+        if (!response.ok) return;
+        const data = await response.json();
+        const steps = Array.isArray(data.steps) ? data.steps : [];
+        const summary = data.summary || {{}};
+        const html = steps.map(step => {{
+          const completed = !!step.completed;
+          const klass = completed ? 'ok' : 'warn';
+          const buttonLabel = completed ? 'Mark Pending' : 'Mark Done';
+          return `<div class="wizard-item onboarding-item ${{klass}}">
+            <strong>${{step.label || step.step_id}}</strong><br/>
+            <span style="color:var(--muted);">${{completed ? 'Completed' : 'Pending'}}</span>
+            <div class="mini-actions">
+              <button class="secondary" onclick="setWizardStep('${{String(step.step_id || '').replace(/'/g, \"\\\\'\")}}', ${{completed ? 'false' : 'true'}})">${{buttonLabel}}</button>
+            </div>
+          </div>`;
+        }}).join('');
+        document.getElementById('wizard-list').innerHTML = `<div class="wizard-item"><strong>Progress:</strong> ${{summary.completed || 0}} / ${{summary.total || 0}} (${{summary.progress_percent || 0}}%)</div>` + (html || '');
+      }} catch (e) {{
+        // ignore transient failures
+      }}
+    }}
+
+    async function setWizardStep(stepId, completed) {{
+      const response = await fetch('/api/wizard-state', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{step_id: stepId, completed}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Wizard update failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      await refreshWizardState();
+    }}
+
+    async function refreshInbox() {{
+      try {{
+        const response = await fetch('/api/task-inbox');
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        const html = items.map(item => {{
+          const intent = String(item.intent || '');
+          const safeIntent = intent.replace(/'/g, "\\\\'").replace(/\\n/g, ' ');
+          return `<div class="inbox-item">
+            <strong>${{item.item_id}}</strong> [${{item.priority}} | ${{item.status}}]<br/>
+            <span style="color:var(--muted);">${{intent}}</span>
+            <div class="mini-actions">
+              <button onclick="useInboxItemAsPrompt('${{safeIntent}}')">Use As Prompt</button>
+              <button class="secondary" onclick="updateInboxItem('${{item.item_id}}', 'in_progress')">In Progress</button>
+              <button class="secondary" onclick="updateInboxItem('${{item.item_id}}', 'done')">Done</button>
+              <button class="secondary" onclick="deleteInboxItem('${{item.item_id}}')">Delete</button>
+            </div>
+          </div>`;
+        }}).join('');
+        document.getElementById('inbox-list').innerHTML = html || '<div class="inbox-item">No inbox items yet.</div>';
+      }} catch (e) {{
+        // ignore transient failures
+      }}
+    }}
+
+    function useInboxItemAsPrompt(intent) {{
+      document.getElementById('prompt').value = intent || '';
+      document.getElementById('meta').textContent = 'Planner prompt loaded from inbox item.';
+    }}
+
+    async function addInboxItem() {{
+      const intent = (document.getElementById('inbox-intent').value || '').trim();
+      const priority = (document.getElementById('inbox-priority').value || 'normal').trim();
+      if (!intent) {{
+        document.getElementById('meta').textContent = 'Inbox intent is required.';
+        return;
+      }}
+      const response = await fetch('/api/task-inbox', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'add', intent, priority}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Inbox add failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('inbox-intent').value = '';
+      await refreshInbox();
+    }}
+
+    async function updateInboxItem(itemId, status) {{
+      const response = await fetch('/api/task-inbox', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'update', item_id: itemId, status}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Inbox update failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      await refreshInbox();
+    }}
+
+    async function deleteInboxItem(itemId) {{
+      const response = await fetch('/api/task-inbox', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'delete', item_id: itemId}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Inbox delete failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      await refreshInbox();
+    }}
+
+    async function refreshSchedules() {{
+      try {{
+        const response = await fetch('/api/schedules');
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        const html = items.map(item => {{
+          return `<div class="schedule-item">
+            <strong>${{item.schedule_id}}</strong> [${{item.enabled ? 'enabled' : 'disabled'}}]<br/>
+            <span style="color:var(--muted);">${{item.intent}}</span><br/>
+            <span style="color:var(--muted);">every ${{item.interval_minutes}} min | next=${{item.next_run_at || 'n/a'}}</span>
+            <div class="mini-actions">
+              <button class="secondary" onclick="toggleSchedule('${{item.schedule_id}}', ${{item.enabled ? 'false' : 'true'}})">${{item.enabled ? 'Disable' : 'Enable'}}</button>
+              <button class="secondary" onclick="deleteSchedule('${{item.schedule_id}}')">Delete</button>
+            </div>
+          </div>`;
+        }}).join('');
+        document.getElementById('schedule-list').innerHTML = html || '<div class="schedule-item">No schedules yet.</div>';
+      }} catch (e) {{
+        // ignore transient failures
+      }}
+    }}
+
+    async function createSchedule() {{
+      const intent = (document.getElementById('schedule-intent').value || '').trim();
+      const intervalRaw = (document.getElementById('schedule-interval').value || '').trim();
+      const intervalMinutes = Number(intervalRaw);
+      if (!intent) {{
+        document.getElementById('meta').textContent = 'Schedule intent is required.';
+        return;
+      }}
+      if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {{
+        document.getElementById('meta').textContent = 'Schedule interval must be > 0 minutes.';
+        return;
+      }}
+      const response = await fetch('/api/schedules', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          action: 'create',
+          intent,
+          interval_minutes: Math.floor(intervalMinutes),
+          agent_id: document.getElementById('agent').value || 'default'
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Schedule create failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('schedule-intent').value = '';
+      await refreshSchedules();
+      await refreshInbox();
+    }}
+
+    async function toggleSchedule(scheduleId, enabled) {{
+      const response = await fetch('/api/schedules', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'toggle', schedule_id: scheduleId, enabled}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Schedule update failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      await refreshSchedules();
+    }}
+
+    async function deleteSchedule(scheduleId) {{
+      const response = await fetch('/api/schedules', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{action: 'delete', schedule_id: scheduleId}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Schedule delete failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      await refreshSchedules();
+    }}
+
     async function refreshTraces() {{
       try {{
         const response = await fetch('/api/traces');
@@ -3339,6 +3936,9 @@ def _render_html(workflows: list[str]) -> str:
     showOllamaSetupPlan();
     refreshPermissions();
     refreshRuntimeStatus();
+    refreshWizardState();
+    refreshInbox();
+    refreshSchedules();
     refreshTraces();
     loadChatHistory();
     refreshCostEstimator();
@@ -3346,6 +3946,9 @@ def _render_html(workflows: list[str]) -> str:
     document.getElementById('assistant-input').addEventListener('input', refreshCostEstimator);
     document.getElementById('primary_provider').addEventListener('input', refreshCostEstimator);
     setInterval(refreshRuntimeStatus, 5000);
+    setInterval(refreshWizardState, 15000);
+    setInterval(refreshInbox, 15000);
+    setInterval(refreshSchedules, 15000);
     setInterval(refreshTraces, 5000);
     setInterval(refreshCostEstimator, 30000);
   </script>

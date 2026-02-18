@@ -88,6 +88,8 @@ Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step
 - Runtime provider panel: GUI shows per-provider enabled/configured/usable state with quick diagnostics.
 - Provider connectivity check: GUI button `Test Primary Provider` runs an immediate probe for current provider credentials/connectivity.
 - Trace auditability: inspect compact trace list, open full trace detail, export trace JSON, and export support bundles.
+- First-run wizard: guide tracks onboarding completion state (`Docker`, `LLM`, provider, permissions, first preview).
+- Task inbox + scheduler: capture intents, prioritize work, and enqueue recurring intents on an interval.
 
 ## Recorder Error Guidance
 

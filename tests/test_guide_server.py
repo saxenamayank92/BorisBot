@@ -677,6 +677,35 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(latest["stage_count"], 2)
         self.assertEqual(latest["last_event"], "planner_validated")
 
+    def test_wizard_state_update(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        wizard = state.get_wizard_state()
+        self.assertTrue(wizard["steps"])
+        first_step = wizard["steps"][0]["step_id"]
+        updated = state.set_wizard_step(first_step, True)
+        rows = [row for row in updated["steps"] if row["step_id"] == first_step]
+        self.assertTrue(rows)
+        self.assertTrue(rows[0]["completed"])
+
+    def test_task_inbox_add_update_delete(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        item = state.add_inbox_item("Review LinkedIn feed", priority="high")
+        self.assertEqual(item["priority"], "high")
+        updated = state.update_inbox_item(item["item_id"], "in_progress")
+        self.assertEqual(updated["status"], "in_progress")
+        self.assertTrue(state.delete_inbox_item(item["item_id"]))
+
+    def test_schedule_tick_enqueues_inbox_item(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        sched = state.create_schedule("Daily report", 1, agent_id="default")
+        state._schedules[0]["next_run_at"] = "2000-01-01T00:00:00"
+        queued = state.tick_schedules()
+        self.assertEqual(queued, 1)
+        inbox = state.list_inbox_items()
+        self.assertTrue(inbox)
+        self.assertIn("Daily report", inbox[0]["intent"])
+        self.assertIn(sched["schedule_id"], inbox[0]["source"])
+
     def test_build_support_bundle_contains_runtime_permissions_and_traces(self) -> None:
         state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
         trace = state.add_plan_trace(
@@ -696,6 +725,9 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(bundle["agent_id"], "default")
         self.assertIn("runtime_status", bundle)
         self.assertIn("permissions", bundle)
+        self.assertIn("wizard_state", bundle)
+        self.assertIn("task_inbox", bundle)
+        self.assertIn("schedules", bundle)
         self.assertTrue(bundle["trace_summaries"])
         self.assertEqual(bundle["recent_traces"][0]["trace_id"], trace["trace_id"])
 
@@ -734,6 +766,12 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("Run Bootstrap Setup", html)
         self.assertIn("runBootstrapSetup()", html)
         self.assertIn("Run Doctor", html)
+        self.assertIn("First-Run Wizard", html)
+        self.assertIn("refreshWizardState()", html)
+        self.assertIn("Task Inbox", html)
+        self.assertIn("addInboxItem()", html)
+        self.assertIn("Scheduler", html)
+        self.assertIn("createSchedule()", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(
