@@ -22,6 +22,7 @@ from borisbot.cli import (
     provider_status,
     provider_test,
     release_check,
+    setup,
     set_permission,
 )
 from borisbot.cli import _compute_lint_violations
@@ -466,6 +467,47 @@ class CliWorkflowContractTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "failed")
             self.assertEqual(payload["error"], "OLLAMA_NOT_INSTALLED")
+
+    def test_setup_json_payload_without_guide_launch(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value="/usr/bin/docker"), mock.patch(
+            "borisbot.cli._run_setup_command",
+            return_value=(0, "docker ok"),
+        ), mock.patch(
+            "borisbot.cli.llm_setup",
+            return_value=None,
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                setup(launch_guide=False, json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertIn("docker", payload)
+            self.assertIn("llm_setup", payload)
+            self.assertEqual(payload["guide"]["launch_requested"], False)
+
+    def test_setup_launches_guide_when_requested(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value="/usr/bin/docker"), mock.patch(
+            "borisbot.cli._run_setup_command",
+            return_value=(0, "docker ok"),
+        ), mock.patch(
+            "borisbot.cli.llm_setup",
+            return_value=None,
+        ), mock.patch("borisbot.cli.run_guide_server") as run_guide:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                setup(launch_guide=True, json_output=False, guide_host="127.0.0.1", guide_port=7799)
+            run_guide.assert_called_once()
+
+    def test_setup_nonzero_when_guide_disabled_and_setup_fails(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value=None), mock.patch(
+            "borisbot.cli.llm_setup",
+            side_effect=typer.Exit(code=1),
+        ):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    setup(launch_guide=False, json_output=False)
+            self.assertEqual(cm.exception.exit_code, 1)
+            self.assertIn("SETUP: WARN", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ import time
 import re
 import httpx
 import socket
+import io
+from contextlib import redirect_stdout
 from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
@@ -298,7 +300,10 @@ def plan_preview(
 
 def _run_setup_command(command: list[str]) -> tuple[int, str]:
     """Run setup command and return (returncode, combined output)."""
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except FileNotFoundError:
+        return 127, f"command not found: {command[0] if command else 'unknown'}"
     output = (result.stdout or "") + (result.stderr or "")
     return int(result.returncode), output.strip()
 
@@ -412,6 +417,111 @@ def llm_setup(
     typer.echo(f"  model: {model}")
     typer.echo(f"  start: {' '.join(start_cmd)}")
     typer.echo(f"  pull: {' '.join(pull_cmd)}")
+
+
+@app.command("setup")
+def setup(
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+    auto_install: bool = typer.Option(True, "--auto-install/--no-auto-install"),
+    launch_guide: bool = typer.Option(True, "--launch-guide/--no-launch-guide"),
+    guide_host: str = typer.Option("127.0.0.1", "--guide-host"),
+    guide_port: int = typer.Option(7788, "--guide-port"),
+    open_browser: bool = typer.Option(True, "--open-browser/--no-open-browser"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Bootstrap local prerequisites and optionally launch the guided UI."""
+    if not isinstance(model_name, str):
+        model_name = "llama3.2:3b"
+    if not isinstance(auto_install, bool):
+        auto_install = True
+    if not isinstance(launch_guide, bool):
+        launch_guide = True
+    if not isinstance(guide_host, str):
+        guide_host = "127.0.0.1"
+    if not isinstance(guide_port, int):
+        guide_port = 7788
+    if not isinstance(open_browser, bool):
+        open_browser = True
+    if not isinstance(json_output, bool):
+        json_output = False
+
+    model = model_name.strip() or "llama3.2:3b"
+    docker_installed = shutil.which("docker") is not None
+    docker_ok = False
+    docker_message = ""
+    if docker_installed:
+        docker_rc, docker_output = _run_setup_command(["docker", "info"])
+        docker_ok = docker_rc == 0
+        docker_message = docker_output or ("ok" if docker_ok else "docker info failed")
+    else:
+        docker_message = "docker command not found"
+
+    llm_payload: dict[str, object] = {}
+    llm_ok = False
+    llm_out = io.StringIO()
+    llm_exit_code = 0
+    try:
+        with redirect_stdout(llm_out):
+            llm_setup(model_name=model, auto_install=auto_install, json_output=True)
+        llm_ok = True
+    except typer.Exit as exc:
+        llm_exit_code = int(exc.exit_code or 1)
+    llm_text = llm_out.getvalue().strip()
+    if llm_text:
+        try:
+            parsed = json.loads(llm_text)
+            if isinstance(parsed, dict):
+                llm_payload = parsed
+                llm_ok = str(parsed.get("status", "")).lower() == "ok"
+        except json.JSONDecodeError:
+            llm_payload = {"status": "failed", "error": "INVALID_SETUP_PAYLOAD", "raw": llm_text}
+            llm_ok = False
+    if not llm_payload:
+        llm_payload = {"status": "failed", "error": "LLM_SETUP_NO_OUTPUT"}
+        llm_ok = False
+
+    overall_ok = docker_ok and llm_ok
+    guide_url = f"http://{guide_host}:{guide_port}"
+    payload = {
+        "status": "ok" if overall_ok else "warn",
+        "docker": {
+            "installed": docker_installed,
+            "ready": docker_ok,
+            "message": docker_message,
+        },
+        "llm_setup": llm_payload,
+        "guide": {
+            "launch_requested": launch_guide,
+            "url": guide_url,
+        },
+    }
+
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        if launch_guide:
+            run_guide_server(Path.cwd(), host=guide_host, port=guide_port, open_browser=open_browser)
+        if llm_exit_code != 0 and not launch_guide:
+            raise typer.Exit(code=llm_exit_code)
+        return
+
+    typer.echo("SETUP: OK" if overall_ok else "SETUP: WARN")
+    typer.echo(f"  docker: {'ready' if docker_ok else 'not_ready'}")
+    if docker_message:
+        typer.echo(f"  docker_detail: {docker_message}")
+    llm_status = str(llm_payload.get("status", "failed"))
+    typer.echo(f"  llm_setup: {llm_status}")
+    if llm_status != "ok":
+        err = str(llm_payload.get("error", "UNKNOWN")).strip()
+        msg = str(llm_payload.get("message", "")).strip()
+        typer.echo(f"  llm_error: {err}")
+        if msg:
+            typer.echo(f"  llm_message: {msg}")
+    typer.echo(f"  guide_url: {guide_url}")
+    if launch_guide:
+        run_guide_server(Path.cwd(), host=guide_host, port=guide_port, open_browser=open_browser)
+        return
+    if not overall_ok:
+        raise typer.Exit(code=1)
 
 
 @app.command("assistant-chat")
