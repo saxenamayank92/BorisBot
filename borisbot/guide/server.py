@@ -1934,6 +1934,26 @@ def _render_html(workflows: list[str]) -> str:
       gap: 8px;
       margin-top: 8px;
     }}
+    .onboarding-list {{
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 13px;
+    }}
+    .onboarding-item {{
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      background: #fffdf8;
+    }}
+    .onboarding-item.ok {{
+      border-color: #98c9b0;
+      background: #ecfaf2;
+    }}
+    .onboarding-item.warn {{
+      border-color: #deb185;
+      background: #fff2e6;
+    }}
     .provider-card {{
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -2068,6 +2088,7 @@ def _render_html(workflows: list[str]) -> str:
         <div class="step" style="margin-top:0;padding-top:0;border-top:0;">
           <h3>Runtime Status</h3>
           <p id="runtime-line">Loading...</p>
+          <div id="onboarding-list" class="onboarding-list"></div>
           <div id="provider-cards" class="provider-cards"></div>
         </div>
         <div class="job-meta" id="meta">No command running.</div>
@@ -2839,6 +2860,33 @@ def _render_html(workflows: list[str]) -> str:
         const heal = data.self_heal_healed ? 'recovered' : (data.self_heal_probe_ok ? 'ok' : 'failed');
         const line = `Provider=${{data.provider_name}}:${{data.model_name}} | Health=${{data.provider_state}} | Budget=${{data.budget_status}} | Today=$${{Number(data.today_cost_usd || 0).toFixed(2)}}/${{Number(data.daily_limit_usd || 0).toFixed(2)}} | Queue=${{data.queue_depth}} | Heartbeat=${{data.heartbeat_age_seconds >= 0 ? data.heartbeat_age_seconds + 's' : 'unknown'}} | Heal=${{heal}}${{ollamaNote}}`;
         document.getElementById('runtime-line').textContent = line;
+        const checks = [];
+        checks.push({{
+          label: 'Ollama installed',
+          ok: !!data.ollama_installed,
+          action: 'Click "One-Touch LLM Setup" in Environment.',
+        }});
+        checks.push({{
+          label: 'Primary provider usable',
+          ok: String(data.provider_state || 'unknown') === 'healthy',
+          action: 'Use Provider Onboarding + Test Primary Provider.',
+        }});
+        checks.push({{
+          label: 'Budget accepts new LLM tasks',
+          ok: String(data.budget_status || '').toUpperCase() !== 'BLOCKED',
+          action: 'Raise daily limit or wait for next UTC day.',
+        }});
+        checks.push({{
+          label: 'Heartbeat live',
+          ok: Number(data.heartbeat_age_seconds) >= 0 && Number(data.heartbeat_age_seconds) < 90,
+          action: 'Restart supervisor if heartbeat is stale.',
+        }});
+        const onboardingHtml = checks.map(item => {{
+          const klass = item.ok ? 'ok' : 'warn';
+          const status = item.ok ? 'OK' : 'ACTION NEEDED';
+          return `<div class="onboarding-item ${{klass}}"><strong>${{item.label}}:</strong> ${{status}}<br/><span style="color:var(--muted);">${{item.action}}</span></div>`;
+        }}).join('');
+        document.getElementById('onboarding-list').innerHTML = onboardingHtml;
         const matrix = data.provider_matrix || {{}};
         const cards = Object.keys(matrix).sort().map(name => {{
           const row = matrix[name] || {{}};
