@@ -20,6 +20,7 @@ ALLOWED_TOOLS = {
     TOOL_WEB_FETCH,
     TOOL_SCHEDULER,
 }
+ORDERED_TOOLS = sorted(ALLOWED_TOOLS)
 
 DECISION_PROMPT = "prompt"
 DECISION_ALLOW = "allow"
@@ -125,6 +126,19 @@ def set_agent_tool_permission_sync(
         conn.commit()
     finally:
         conn.close()
+
+
+def get_agent_permission_matrix_sync(
+    agent_id: str,
+    *,
+    db_path: Path | None = None,
+) -> dict[str, str]:
+    """Return all tool decisions for agent, defaulting each tool to prompt."""
+    path = db_path or DB_PATH
+    matrix: dict[str, str] = {}
+    for tool_name in ORDERED_TOOLS:
+        matrix[tool_name] = get_agent_tool_permission_sync(agent_id, tool_name, db_path=path)
+    return matrix
 
 
 async def _ensure_table_async() -> None:

@@ -19,7 +19,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 import httpx
 
@@ -32,6 +32,7 @@ from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
 from borisbot.supervisor.profile_config import load_profile, save_profile
 from borisbot.supervisor.tool_permissions import (
+    ALLOWED_TOOLS,
     DECISION_ALLOW,
     DECISION_DENY,
     DECISION_PROMPT,
@@ -40,6 +41,7 @@ from borisbot.supervisor.tool_permissions import (
     TOOL_SCHEDULER,
     TOOL_SHELL,
     TOOL_WEB_FETCH,
+    get_agent_permission_matrix_sync,
     get_agent_tool_permission_sync,
     set_agent_tool_permission_sync,
 )
@@ -548,6 +550,12 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/profile":
                 self._json_response(load_profile())
                 return
+            if self.path.startswith("/api/permissions"):
+                query = parse_qs(urlsplit(self.path).query)
+                agent_id = str(query.get("agent_id", ["default"])[0]).strip() or "default"
+                matrix = get_agent_permission_matrix_sync(agent_id)
+                self._json_response({"agent_id": agent_id, "permissions": matrix})
+                return
             if self.path == "/api/traces":
                 self._json_response({"items": state.list_traces()})
                 return
@@ -614,6 +622,28 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self._json_response(profile, status=HTTPStatus.OK)
+                return
+            if self.path == "/api/permissions":
+                payload = self._read_json()
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                tool_name = str(payload.get("tool_name", "")).strip()
+                decision = str(payload.get("decision", "")).strip()
+                if tool_name not in ALLOWED_TOOLS:
+                    self._json_response(
+                        {"error": f"unsupported tool_name '{tool_name}'"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                try:
+                    set_agent_tool_permission_sync(agent_id, tool_name, decision)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                matrix = get_agent_permission_matrix_sync(agent_id)
+                self._json_response(
+                    {"agent_id": agent_id, "tool_name": tool_name, "decision": decision, "permissions": matrix},
+                    status=HTTPStatus.OK,
+                )
                 return
             if self.path == "/api/plan-preview":
                 payload = self._read_json()
@@ -914,7 +944,7 @@ def _render_html(workflows: list[str]) -> str:
         <label for="task">New task id for recording</label>
         <input id="task" value="wf_demo" />
         <label for="agent">Agent id</label>
-        <input id="agent" value="default" />
+        <input id="agent" value="default" onchange="refreshPermissions()" />
         <label for="start">Start URL for recording</label>
         <input id="start" value="https://example.com" />
         <label for="model">Ollama model</label>
@@ -946,6 +976,15 @@ def _render_html(workflows: list[str]) -> str:
           <div class="actions">
             <button class="secondary" onclick="startRecord()">Start Recording</button>
             <button onclick="stopCurrent()">Stop Recording</button>
+          </div>
+        </div>
+
+        <div class="step">
+          <h3>Permission Matrix</h3>
+          <p>Set per-agent tool decisions used by dry-run and execution gates.</p>
+          <div id="permission-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;"></div>
+          <div class="actions">
+            <button class="secondary" onclick="refreshPermissions()">Refresh Permissions</button>
           </div>
         </div>
 
@@ -1030,7 +1069,9 @@ def _render_html(workflows: list[str]) -> str:
         if (data.error === 'permission_required') {{
           const ok = window.confirm(`${{data.message}} Approve now?`);
           if (ok) {{
-            return runAction(action, true);
+            const result = await runAction(action, true);
+            refreshPermissions();
+            return result;
           }}
           document.getElementById('meta').textContent = 'Permission not granted: ' + (data.tool_name || '');
           return;
@@ -1048,6 +1089,9 @@ def _render_html(workflows: list[str]) -> str:
         if (!response.ok) return;
         const profile = await response.json();
         document.getElementById('agent_name').value = profile.agent_name || 'default';
+        if (!document.getElementById('agent').value) {{
+          document.getElementById('agent').value = profile.agent_name || 'default';
+        }}
         document.getElementById('primary_provider').value = profile.primary_provider || 'ollama';
         document.getElementById('provider_chain').value = Array.isArray(profile.provider_chain)
           ? profile.provider_chain.join(',')
@@ -1083,7 +1127,52 @@ def _render_html(workflows: list[str]) -> str:
         return;
       }}
       document.getElementById('meta').textContent = 'Profile saved.';
+      document.getElementById('agent').value = payload.agent_name;
+      refreshPermissions();
       refreshRuntimeStatus();
+    }}
+
+    function permissionOptionMarkup(selected) {{
+      const values = ['prompt', 'allow', 'deny'];
+      return values.map(v => `<option value="${{v}}" ${{selected === v ? 'selected' : ''}}>${{v}}</option>`).join('');
+    }}
+
+    async function refreshPermissions() {{
+      const agentId = document.getElementById('agent').value || 'default';
+      try {{
+        const response = await fetch(`/api/permissions?agent_id=${{encodeURIComponent(agentId)}}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const permissions = data.permissions || {{}};
+        const tools = Object.keys(permissions).sort();
+        const html = tools.map(tool => `
+          <label style="margin:0;">${{tool}}</label>
+          <select id="perm_${{tool}}" onchange="savePermission('${{tool}}')">
+            ${{permissionOptionMarkup(permissions[tool])}}
+          </select>
+        `).join('');
+        document.getElementById('permission-grid').innerHTML = html;
+      }} catch (e) {{
+        // ignore transient permission fetch failures
+      }}
+    }}
+
+    async function savePermission(toolName) {{
+      const agentId = document.getElementById('agent').value || 'default';
+      const select = document.getElementById(`perm_${{toolName}}`);
+      if (!select) return;
+      const decision = select.value;
+      const response = await fetch('/api/permissions', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{agent_id: agentId, tool_name: toolName, decision}})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Permission update failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('meta').textContent = `Permission updated: ${{toolName}}=${{decision}}`;
     }}
 
     async function runPlanPreview() {{
@@ -1126,7 +1215,9 @@ def _render_html(workflows: list[str]) -> str:
         if (data.error === 'permission_required') {{
           const ok = window.confirm(`${{data.message}} Approve now?`);
           if (ok) {{
-            return executeApprovedPlan(true);
+            const result = await executeApprovedPlan(true);
+            refreshPermissions();
+            return result;
           }}
           document.getElementById('meta').textContent = 'Permission not granted: ' + (data.tool_name || '');
           return;
@@ -1235,6 +1326,7 @@ def _render_html(workflows: list[str]) -> str:
 
     setViewMode('split');
     loadProfile();
+    refreshPermissions();
     refreshRuntimeStatus();
     refreshTraces();
     setInterval(refreshRuntimeStatus, 5000);
