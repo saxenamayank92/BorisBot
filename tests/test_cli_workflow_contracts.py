@@ -11,6 +11,7 @@ from unittest import mock
 import typer
 
 from borisbot.cli import (
+    _resolve_session_provider_model,
     _build_doctor_report,
     _load_and_validate_workflow,
     assistant_chat,
@@ -110,6 +111,21 @@ class CliWorkflowContractTests(unittest.TestCase):
             max_high_risk=0,
         )
         self.assertEqual(len(violations), 3)
+
+    def test_resolve_session_provider_model_from_profile(self) -> None:
+        with mock.patch(
+            "borisbot.cli.load_profile",
+            return_value={
+                "primary_provider": "openai",
+                "model_name": "gpt-4o-mini",
+                "provider_settings": {
+                    "openai": {"model_name": "gpt-4o"},
+                },
+            },
+        ):
+            provider, model = _resolve_session_provider_model("", "")
+            self.assertEqual(provider, "openai")
+            self.assertEqual(model, "gpt-4o")
 
     def test_release_check_includes_failure_summary(self) -> None:
         workflow_path = self._write_workflow(

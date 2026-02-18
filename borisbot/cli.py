@@ -1054,8 +1054,31 @@ def cleanup_browsers():
     typer.echo("Browser session cleanup complete.")
 
 
-async def _build_session_status(agent_id: str, model_name: str) -> dict:
+def _resolve_session_provider_model(provider_name: str, model_name: str) -> tuple[str, str]:
+    """Resolve provider/model defaults from profile when args are blank."""
+    provider = str(provider_name).strip().lower()
+    model = str(model_name).strip()
+    profile = load_profile()
+    if not provider:
+        candidate = str(profile.get("primary_provider", "")).strip().lower()
+        provider = candidate or "ollama"
+    if not model:
+        settings = profile.get("provider_settings", {})
+        if isinstance(settings, dict):
+            row = settings.get(provider, {})
+            if isinstance(row, dict):
+                candidate = str(row.get("model_name", "")).strip()
+                if candidate:
+                    model = candidate
+        if not model:
+            candidate = str(profile.get("model_name", "")).strip()
+            model = candidate or "llama3.2:3b"
+    return provider, model
+
+
+async def _build_session_status(agent_id: str, provider_name: str, model_name: str) -> dict:
     """Assemble deterministic runtime budget and health snapshot."""
+    provider_name, model_name = _resolve_session_provider_model(provider_name, model_name)
     cost_guard = CostGuard()
     budget = await cost_guard.get_budget_status(agent_id)
     session_start = await cost_guard.get_runtime_session_started_at()
@@ -1075,7 +1098,6 @@ async def _build_session_status(agent_id: str, model_name: str) -> dict:
         queue_depth = int(row["count"] if row else 0)
         break
 
-    provider_name = "ollama"
     provider_state = "unknown"
     try:
         response = httpx.get(f"{SUPERVISOR_URL}/metrics/providers", timeout=2.0)
@@ -1163,16 +1185,27 @@ async def _set_budget_limits(
 def session_status(
     agent_id: str = typer.Option("default", "--agent-id", help="Agent id for budget status"),
     model_name: str = typer.Option(
-        os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b"),
+        "",
         "--model-name",
-        help="Primary model label to display",
+        help="Model label override (defaults to profile provider model)",
+    ),
+    provider_name: str = typer.Option(
+        "",
+        "--provider",
+        help="Provider override (defaults to profile primary provider)",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print full status snapshot as JSON"),
 ):
     """Print deterministic provider, token, and budget status snapshot."""
     if not isinstance(json_output, bool):
         json_output = False
-    snapshot = asyncio.run(_build_session_status(agent_id=agent_id, model_name=model_name))
+    snapshot = asyncio.run(
+        _build_session_status(
+            agent_id=agent_id,
+            provider_name=provider_name,
+            model_name=model_name,
+        )
+    )
     heartbeat = read_heartbeat_snapshot()
     if isinstance(heartbeat, dict):
         ts = heartbeat.get("timestamp")
