@@ -129,6 +129,7 @@ ACTION_TOOL_MAP = {
     "docker_info": TOOL_SHELL,
     "cleanup_sessions": TOOL_BROWSER,
     "session_status": TOOL_SHELL,
+    "doctor": TOOL_SHELL,
     "ollama_check": TOOL_SHELL,
     "ollama_install": TOOL_SHELL,
     "ollama_start": TOOL_SHELL,
@@ -1074,6 +1075,9 @@ def build_action_command(
         return [python_bin, "-m", "borisbot.cli", "cleanup-browsers"]
     if action == "session_status":
         return [python_bin, "-m", "borisbot.cli", "session-status"]
+    if action == "doctor":
+        model = params.get("model_name", "").strip() or "llama3.2:3b"
+        return [python_bin, "-m", "borisbot.cli", "doctor", "--model", model]
     if action == "ollama_check":
         return ["ollama", "--version"]
     if action == "ollama_install":
@@ -2101,6 +2105,7 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runOneTouchLlmSetup()">One-Touch LLM Setup</button>
             <button onclick="runBootstrapSetup()">Run Bootstrap Setup</button>
             <button onclick="runAction('cleanup_sessions')">Reset Browser Sessions</button>
+            <button class="secondary" onclick="runAction('doctor')">Run Doctor</button>
             <button onclick="runAction('verify')">Run Verify</button>
             <button onclick="runAction('session_status')">Session Status</button>
             <button class="secondary" onclick="showOllamaSetupPlan()">Show Setup Plan</button>

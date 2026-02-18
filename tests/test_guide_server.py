@@ -135,6 +135,15 @@ class GuideServerCommandTests(unittest.TestCase):
         )
         self.assertEqual(cmd, [sys.executable, "-m", "borisbot.cli", "session-status"])
 
+    def test_doctor_command(self) -> None:
+        cmd = build_action_command(
+            "doctor",
+            {"model_name": "llama3.2:3b"},
+            workspace=Path.cwd(),
+            python_bin=sys.executable,
+        )
+        self.assertEqual(cmd, [sys.executable, "-m", "borisbot.cli", "doctor", "--model", "llama3.2:3b"])
+
     def test_ollama_install_command(self) -> None:
         cmd = _resolve_ollama_install_command(
             "darwin",
@@ -178,6 +187,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(required_tool_for_action("verify"), "shell")
         self.assertEqual(required_tool_for_action("llm_setup"), "shell")
         self.assertEqual(required_tool_for_action("bootstrap_setup"), "shell")
+        self.assertEqual(required_tool_for_action("doctor"), "shell")
         self.assertEqual(required_tool_for_action("policy_automation"), "shell")
         self.assertIsNone(required_tool_for_action("unknown_action"))
 
@@ -661,6 +671,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("policy_safe_local", html)
         self.assertIn("Run Bootstrap Setup", html)
         self.assertIn("runBootstrapSetup()", html)
+        self.assertIn("Run Doctor", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(

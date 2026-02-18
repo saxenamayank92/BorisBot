@@ -369,6 +369,64 @@ def _run_setup_command(command: list[str]) -> tuple[int, str]:
     return int(result.returncode), output.strip()
 
 
+def _build_doctor_report(model_name: str) -> dict[str, object]:
+    """Build deterministic local prerequisite diagnostics snapshot."""
+    model = (model_name or "").strip() or "llama3.2:3b"
+    docker_installed = shutil.which("docker") is not None
+    docker_ready = False
+    docker_message = ""
+    if docker_installed:
+        docker_rc, docker_output = _run_setup_command(["docker", "info"])
+        docker_ready = docker_rc == 0
+        docker_message = docker_output or ("ok" if docker_ready else "docker info failed")
+    else:
+        docker_message = "docker command not found"
+
+    ollama_installed = shutil.which("ollama") is not None
+    ollama_reachable = False
+    ollama_message = ""
+    model_pulled = False
+    if ollama_installed:
+        try:
+            response = httpx.get("http://127.0.0.1:11434/api/tags", timeout=2.0)
+            if response.status_code == 200:
+                ollama_reachable = True
+                payload = response.json()
+                models = payload.get("models", []) if isinstance(payload, dict) else []
+                if isinstance(models, list):
+                    for row in models:
+                        if not isinstance(row, dict):
+                            continue
+                        name = str(row.get("name", "")).strip()
+                        if name == model:
+                            model_pulled = True
+                            break
+                ollama_message = "reachable"
+            else:
+                ollama_message = f"tags probe failed: HTTP {response.status_code}"
+        except Exception as exc:
+            ollama_message = str(exc)
+    else:
+        ollama_message = "ollama command not found"
+
+    status = "ok" if (docker_ready and ollama_reachable and model_pulled) else "warn"
+    return {
+        "status": status,
+        "model": model,
+        "docker": {
+            "installed": docker_installed,
+            "ready": docker_ready,
+            "message": docker_message,
+        },
+        "ollama": {
+            "installed": ollama_installed,
+            "reachable": ollama_reachable,
+            "message": ollama_message,
+            "model_pulled": model_pulled,
+        },
+    }
+
+
 @app.command("llm-setup")
 def llm_setup(
     model_name: str = typer.Option("llama3.2:3b", "--model"),
@@ -582,6 +640,41 @@ def setup(
         run_guide_server(Path.cwd(), host=guide_host, port=guide_port, open_browser=open_browser)
         return
     if not overall_ok:
+        raise typer.Exit(code=1)
+
+
+@app.command("doctor")
+def doctor(
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+    strict: bool = typer.Option(False, "--strict", help="Exit nonzero when status is not OK"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Run local runtime diagnostics with actionable status hints."""
+    if not isinstance(model_name, str):
+        model_name = "llama3.2:3b"
+    if not isinstance(strict, bool):
+        strict = False
+    if not isinstance(json_output, bool):
+        json_output = False
+    report = _build_doctor_report(model_name)
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        if strict and report.get("status") != "ok":
+            raise typer.Exit(code=1)
+        return
+
+    typer.echo("DOCTOR: " + str(report.get("status", "unknown")).upper())
+    docker = report.get("docker", {})
+    ollama = report.get("ollama", {})
+    typer.echo(
+        f"  docker: installed={str(bool(docker.get('installed', False))).lower()} ready={str(bool(docker.get('ready', False))).lower()}"
+    )
+    typer.echo(
+        f"  ollama: installed={str(bool(ollama.get('installed', False))).lower()} reachable={str(bool(ollama.get('reachable', False))).lower()} model_pulled={str(bool(ollama.get('model_pulled', False))).lower()}"
+    )
+    if report.get("status") != "ok":
+        typer.echo("  hint: run `borisbot setup --model " + str(report.get("model", "llama3.2:3b")) + "`")
+    if strict and report.get("status") != "ok":
         raise typer.Exit(code=1)
 
 

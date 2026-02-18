@@ -11,6 +11,7 @@ from unittest import mock
 import typer
 
 from borisbot.cli import (
+    _build_doctor_report,
     _load_and_validate_workflow,
     assistant_chat,
     chat_clear,
@@ -24,6 +25,7 @@ from borisbot.cli import (
     provider_status,
     provider_test,
     release_check,
+    doctor,
     setup,
     set_permission,
 )
@@ -588,6 +590,38 @@ class CliWorkflowContractTests(unittest.TestCase):
                     setup(launch_guide=False, json_output=False)
             self.assertEqual(cm.exception.exit_code, 1)
             self.assertIn("SETUP: WARN", output.getvalue())
+
+    def test_build_doctor_report_ok(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), mock.patch(
+            "borisbot.cli._run_setup_command",
+            return_value=(0, "docker ok"),
+        ), mock.patch("borisbot.cli.httpx.get") as http_get:
+            http_get.return_value = mock.Mock(
+                status_code=200,
+                json=lambda: {"models": [{"name": "llama3.2:3b"}]},
+            )
+            payload = _build_doctor_report("llama3.2:3b")
+        self.assertEqual(payload["status"], "ok")
+
+    def test_doctor_strict_exits_nonzero_on_warn(self) -> None:
+        with mock.patch("borisbot.cli._build_doctor_report", return_value={"status": "warn", "docker": {}, "ollama": {}, "model": "llama3.2:3b"}):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    doctor(model_name="llama3.2:3b", strict=True, json_output=False)
+            self.assertEqual(cm.exception.exit_code, 1)
+            self.assertIn("DOCTOR: WARN", output.getvalue())
+
+    def test_doctor_json_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_doctor_report",
+            return_value={"status": "ok", "model": "llama3.2:3b", "docker": {}, "ollama": {}},
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                doctor(model_name="llama3.2:3b", strict=False, json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "ok")
 
 
 if __name__ == "__main__":
