@@ -133,6 +133,7 @@ ACTION_TOOL_MAP = {
     "ollama_install": TOOL_SHELL,
     "ollama_start": TOOL_SHELL,
     "ollama_pull": TOOL_SHELL,
+    "llm_setup": TOOL_SHELL,
     "verify": TOOL_SHELL,
     "analyze": TOOL_FILESYSTEM,
     "lint": TOOL_FILESYSTEM,
@@ -1008,6 +1009,9 @@ def build_action_command(
     if action == "ollama_pull":
         model = params.get("model_name", "").strip() or "llama3.2:3b"
         return ["ollama", "pull", model]
+    if action == "llm_setup":
+        model = params.get("model_name", "").strip() or "llama3.2:3b"
+        return [python_bin, "-m", "borisbot.cli", "llm-setup", "--model", model, "--json"]
     if action == "verify":
         return [python_bin, "-m", "borisbot.cli", "verify"]
     if action == "analyze":
@@ -2138,29 +2142,17 @@ def _render_html(workflows: list[str]) -> str:
     async function runOneTouchLlmSetup() {{
       document.getElementById('meta').textContent = 'Starting one-touch LLM setup...';
       try {{
-        const statusResp = await fetch('/api/runtime-status');
-        const status = statusResp.ok ? await statusResp.json() : {{}};
-        if (!status.ollama_installed) {{
-          document.getElementById('meta').textContent = 'Installing Ollama...';
-          const installJob = await runActionAndWait('ollama_install');
-          if (installJob.status !== 'completed') {{
-            document.getElementById('meta').textContent = 'Ollama install failed. Review terminal output.';
-            return;
-          }}
+        const setupJob = await runActionAndWait('llm_setup');
+        let payload = null;
+        try {{
+          payload = JSON.parse(setupJob.output || '{{}}');
+        }} catch (e) {{
+          payload = null;
         }}
-        document.getElementById('meta').textContent = 'Starting Ollama runtime...';
-        const startJob = await runActionAndWait('ollama_start');
-        if (startJob.status !== 'completed') {{
-          document.getElementById('meta').textContent = 'Ollama start failed. Review terminal output.';
+        if (!payload || payload.status !== 'ok') {{
+          document.getElementById('meta').textContent = 'One-touch setup failed. Review terminal output.';
           return;
         }}
-        document.getElementById('meta').textContent = 'Pulling selected model...';
-        const pullJob = await runActionAndWait('ollama_pull');
-        if (pullJob.status !== 'completed') {{
-          document.getElementById('meta').textContent = 'Model pull failed. Review terminal output.';
-          return;
-        }}
-        await runActionAndWait('session_status');
         document.getElementById('meta').textContent = 'One-touch LLM setup completed.';
         refreshRuntimeStatus();
       }} catch (e) {{

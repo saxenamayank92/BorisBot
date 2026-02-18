@@ -78,6 +78,18 @@ class GuideServerCommandTests(unittest.TestCase):
         )
         self.assertEqual(cmd, ["ollama", "pull", "llama3.2:3b"])
 
+    def test_llm_setup_command_uses_json_mode(self) -> None:
+        cmd = build_action_command(
+            "llm_setup",
+            {"model_name": "llama3.2:3b"},
+            workspace=Path.cwd(),
+            python_bin=sys.executable,
+        )
+        self.assertEqual(
+            cmd,
+            [sys.executable, "-m", "borisbot.cli", "llm-setup", "--model", "llama3.2:3b", "--json"],
+        )
+
     def test_session_status_command(self) -> None:
         cmd = build_action_command(
             "session_status",
@@ -128,6 +140,7 @@ class GuideServerCommandTests(unittest.TestCase):
     def test_required_tool_mapping(self) -> None:
         self.assertEqual(required_tool_for_action("record"), "browser")
         self.assertEqual(required_tool_for_action("verify"), "shell")
+        self.assertEqual(required_tool_for_action("llm_setup"), "shell")
         self.assertIsNone(required_tool_for_action("unknown_action"))
 
     def test_extract_required_tools_from_plan(self) -> None:
