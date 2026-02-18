@@ -1249,6 +1249,46 @@ def trace_show(
         typer.echo(f"    {index}. {event} {ts}".rstrip())
 
 
+@app.command("support-bundle")
+def support_bundle(
+    agent_id: str = typer.Option("default", "--agent-id", help="Agent id for permission + budget snapshot"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Guide server host"),
+    port: int = typer.Option(7788, "--port", help="Guide server port"),
+    output: Path | None = typer.Option(None, "--output", help="Optional output path for JSON bundle"),
+    json_output: bool = typer.Option(False, "--json", help="Print bundle JSON to stdout"),
+):
+    """Export support bundle from guide runtime for diagnostics."""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(json_output, bool):
+        json_output = False
+    agent = agent_id.strip() or "default"
+    try:
+        payload = _fetch_guide_json(host, port, f"/api/support-bundle?agent_id={quote(agent, safe='')}")
+    except Exception as exc:
+        typer.echo("SUPPORT BUNDLE: FAIL")
+        typer.echo(f"  error: {exc}")
+        raise typer.Exit(code=1)
+
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    target = output
+    if target is None:
+        runtime_dir = Path("runtime")
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        target = runtime_dir / f"support_bundle_{timestamp}.json"
+    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    trace_summaries = payload.get("trace_summaries", [])
+    if not isinstance(trace_summaries, list):
+        trace_summaries = []
+    typer.echo("SUPPORT BUNDLE: OK")
+    typer.echo(f"  file: {target}")
+    typer.echo(f"  trace_summaries: {len(trace_summaries)}")
+
+
 class _ReplayRouter:
     """Replay router with optional explicit selector fallback attempts."""
 

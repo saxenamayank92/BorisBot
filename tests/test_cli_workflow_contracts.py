@@ -29,6 +29,7 @@ from borisbot.cli import (
     session_status,
     setup,
     set_permission,
+    support_bundle,
     trace_list,
     trace_show,
 )
@@ -344,6 +345,31 @@ class CliWorkflowContractTests(unittest.TestCase):
                     trace_show("missing", json_output=False)
             self.assertEqual(cm.exception.exit_code, 1)
             self.assertIn("TRACE SHOW: FAIL", output.getvalue())
+
+    def test_support_bundle_json_output(self) -> None:
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"trace_summaries": [], "runtime_status": {"provider_name": "ollama"}}
+        with mock.patch("borisbot.cli.httpx.get", return_value=response):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                support_bundle(json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertIn("runtime_status", payload)
+
+    def test_support_bundle_writes_output_file(self) -> None:
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"trace_summaries": [{"trace_id": "trace_1"}]}
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch(
+            "borisbot.cli.httpx.get", return_value=response
+        ):
+            target = Path(tmpdir) / "bundle.json"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                support_bundle(output=target, json_output=False)
+            self.assertTrue(target.exists())
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            self.assertIn("trace_summaries", payload)
+            self.assertIn("SUPPORT BUNDLE: OK", output.getvalue())
 
     def test_assistant_chat_human_ok(self) -> None:
         with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="allow"), mock.patch(
