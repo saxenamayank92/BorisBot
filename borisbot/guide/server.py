@@ -225,6 +225,35 @@ def _estimate_preview_cost_usd(provider_name: str, input_tokens: int, output_tok
     return round(input_cost + output_cost, 6)
 
 
+def _build_live_cost_estimate(
+    provider_name: str,
+    planner_prompt: str,
+    assistant_prompt: str,
+) -> dict:
+    """Build deterministic planner/assistant cost estimates from prompt text."""
+    planner_input = _estimate_tokens(planner_prompt)
+    assistant_input = _estimate_tokens(assistant_prompt)
+    planner_output = max(64, int(round(planner_input * 0.8))) if planner_input else 0
+    assistant_output = max(64, int(round(assistant_input * 1.1))) if assistant_input else 0
+    planner_cost = _estimate_preview_cost_usd(provider_name, planner_input, planner_output)
+    assistant_cost = _estimate_preview_cost_usd(provider_name, assistant_input, assistant_output)
+    return {
+        "provider_name": provider_name,
+        "planner": {
+            "input_tokens": planner_input,
+            "output_tokens": planner_output,
+            "total_tokens": planner_input + planner_output,
+            "cost_estimate_usd": planner_cost,
+        },
+        "assistant": {
+            "input_tokens": assistant_input,
+            "output_tokens": assistant_output,
+            "total_tokens": assistant_input + assistant_output,
+            "cost_estimate_usd": assistant_cost,
+        },
+    }
+
+
 def _load_budget_snapshot(agent_id: str) -> dict:
     guard = CostGuard()
     return asyncio.run(guard.get_budget_status(agent_id))
@@ -1499,6 +1528,16 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     status=HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
                 )
                 return
+            if self.path == "/api/cost-estimate":
+                payload = self._read_json()
+                provider_name = str(payload.get("provider_name", "ollama")).strip() or "ollama"
+                planner_prompt = str(payload.get("planner_prompt", "")).strip()
+                assistant_prompt = str(payload.get("assistant_prompt", "")).strip()
+                self._json_response(
+                    _build_live_cost_estimate(provider_name, planner_prompt, assistant_prompt),
+                    status=HTTPStatus.OK,
+                )
+                return
             if self.path == "/api/chat-history":
                 payload = self._read_json()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
@@ -1999,6 +2038,11 @@ def _render_html(workflows: list[str]) -> str:
         <input id="model" value="llama3.2:3b" />
         <label for="prompt">Dry-run planner prompt</label>
         <textarea id="prompt" rows="4" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:10px;">Open LinkedIn feed, scroll a few posts, and like one relevant post.</textarea>
+        <div class="step">
+          <h3>Live Cost Estimator</h3>
+          <p>Estimated tokens/cost for current planner and assistant prompts (refreshes every 30s).</p>
+          <pre id="cost-estimate" style="margin-top:8px;min-height:90px;max-height:180px;">No estimate yet.</pre>
+        </div>
 
         <div class="step">
           <h3>1. Environment</h3>
@@ -2419,6 +2463,33 @@ def _render_html(workflows: list[str]) -> str:
         return;
       }}
       document.getElementById('meta').textContent = 'Provider test OK: ' + (data.message || provider_name);
+    }}
+
+    async function refreshCostEstimator() {{
+      try {{
+        const response = await fetch('/api/cost-estimate', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{
+            provider_name: document.getElementById('primary_provider').value || 'ollama',
+            planner_prompt: document.getElementById('prompt').value || '',
+            assistant_prompt: document.getElementById('assistant-input').value || ''
+          }})
+        }});
+        if (!response.ok) return;
+        const data = await response.json();
+        const planner = data.planner || {{}};
+        const assistant = data.assistant || {{}};
+        const lines = [
+          `Provider: ${{data.provider_name || 'unknown'}}`,
+          '',
+          `Planner: tokens=${{planner.total_tokens || 0}} (in=${{planner.input_tokens || 0}}, out=${{planner.output_tokens || 0}}) | est=$${{Number(planner.cost_estimate_usd || 0).toFixed(4)}}`,
+          `Assistant: tokens=${{assistant.total_tokens || 0}} (in=${{assistant.input_tokens || 0}}, out=${{assistant.output_tokens || 0}}) | est=$${{Number(assistant.cost_estimate_usd || 0).toFixed(4)}}`,
+        ];
+        document.getElementById('cost-estimate').textContent = lines.join('\\n');
+      }} catch (e) {{
+        // keep previous estimate on transient failures
+      }}
     }}
 
     function permissionOptionMarkup(selected) {{
@@ -2994,8 +3065,13 @@ def _render_html(workflows: list[str]) -> str:
     refreshRuntimeStatus();
     refreshTraces();
     loadChatHistory();
+    refreshCostEstimator();
+    document.getElementById('prompt').addEventListener('input', refreshCostEstimator);
+    document.getElementById('assistant-input').addEventListener('input', refreshCostEstimator);
+    document.getElementById('primary_provider').addEventListener('input', refreshCostEstimator);
     setInterval(refreshRuntimeStatus, 5000);
     setInterval(refreshTraces, 5000);
+    setInterval(refreshCostEstimator, 30000);
   </script>
 </body>
 </html>

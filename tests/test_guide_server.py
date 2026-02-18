@@ -15,6 +15,7 @@ from borisbot.guide.server import (
     _build_assistant_response,
     _extract_handoff_intent_from_assistant_trace,
     _build_dry_run_preview,
+    _build_live_cost_estimate,
     _estimate_preview_cost_usd,
     _generate_plan_raw_with_provider,
     _probe_provider_connection,
@@ -177,6 +178,26 @@ class GuideServerCommandTests(unittest.TestCase):
     def test_estimate_preview_cost_non_ollama(self) -> None:
         cost = _estimate_preview_cost_usd("openai", 1000, 1000)
         self.assertGreater(cost, 0.0)
+
+    def test_build_live_cost_estimate_non_ollama(self) -> None:
+        payload = _build_live_cost_estimate(
+            "openai",
+            planner_prompt="Open page and get title",
+            assistant_prompt="Summarize this workflow",
+        )
+        self.assertEqual(payload["provider_name"], "openai")
+        self.assertGreater(payload["planner"]["total_tokens"], 0)
+        self.assertGreater(payload["assistant"]["total_tokens"], 0)
+        self.assertGreater(payload["planner"]["cost_estimate_usd"], 0.0)
+
+    def test_build_live_cost_estimate_ollama_zero_cost(self) -> None:
+        payload = _build_live_cost_estimate(
+            "ollama",
+            planner_prompt="Open page and get title",
+            assistant_prompt="Summarize this workflow",
+        )
+        self.assertEqual(payload["planner"]["cost_estimate_usd"], 0.0)
+        self.assertEqual(payload["assistant"]["cost_estimate_usd"], 0.0)
 
     def test_build_dry_run_preview_budget_blocked(self) -> None:
         with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": True}):
@@ -572,6 +593,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("clearAssistantHistory()", html)
         self.assertIn("provider-cards", html)
         self.assertIn("onboarding-list", html)
+        self.assertIn("Live Cost Estimator", html)
+        self.assertIn("refreshCostEstimator()", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(
