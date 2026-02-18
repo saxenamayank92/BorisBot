@@ -131,6 +131,13 @@ PLANNER_ACTION_TOOL_MAP = {
     "schedule": TOOL_SCHEDULER,
 }
 
+ESTIMATED_PRICING_USD_PER_1K = {
+    "openai": {"input": 0.005, "output": 0.015},
+    "anthropic": {"input": 0.008, "output": 0.024},
+    "google": {"input": 0.0035, "output": 0.0105},
+    "azure": {"input": 0.005, "output": 0.015},
+}
+
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count deterministically from raw text length."""
@@ -172,6 +179,23 @@ def _build_planner_prompt(user_intent: str) -> str:
     )
 
 
+def _estimate_preview_cost_usd(provider_name: str, input_tokens: int, output_tokens: int) -> float:
+    provider = str(provider_name).strip().lower()
+    if provider == "ollama":
+        return 0.0
+    rates = ESTIMATED_PRICING_USD_PER_1K.get(provider)
+    if not rates:
+        return 0.0
+    input_cost = (input_tokens / 1000.0) * float(rates["input"])
+    output_cost = (output_tokens / 1000.0) * float(rates["output"])
+    return round(input_cost + output_cost, 6)
+
+
+def _load_budget_snapshot(agent_id: str) -> dict:
+    guard = CostGuard()
+    return asyncio.run(guard.get_budget_status(agent_id))
+
+
 def _generate_plan_raw_with_ollama(user_intent: str, model_name: str) -> str:
     """Call Ollama generate endpoint and return raw planner output text."""
     if shutil.which("ollama") is None:
@@ -198,10 +222,19 @@ def _generate_plan_raw_with_ollama(user_intent: str, model_name: str) -> str:
     return output
 
 
-def _build_dry_run_preview(intent: str, agent_id: str, model_name: str) -> dict:
+def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider_name: str) -> dict:
     """Build dry-run planner preview with strict schema + permission requirements."""
     if not isinstance(intent, str) or not intent.strip():
         raise ValueError("Plan prompt cannot be empty.")
+    budget_status = _load_budget_snapshot(agent_id)
+    if bool(budget_status.get("blocked", False)):
+        return {
+            "status": "failed",
+            "error_class": "cost_guard",
+            "error_code": "BUDGET_BLOCKED",
+            "message": "Planner calls are blocked by budget limits.",
+            "budget": budget_status,
+        }
     raw_output = _generate_plan_raw_with_ollama(intent, model_name=model_name)
     try:
         parsed = parse_planner_output(raw_output)
@@ -236,6 +269,11 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str) -> dict:
 
     prompt_tokens = _estimate_tokens(_build_planner_prompt(intent))
     completion_tokens = _estimate_tokens(raw_output)
+    estimated_cost = _estimate_preview_cost_usd(
+        provider_name,
+        input_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+    )
     return {
         "status": "ok",
         "planner_output": parsed,
@@ -246,8 +284,10 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str) -> dict:
             "output_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         },
-        "cost_estimate_usd": 0.0,
+        "cost_estimate_usd": estimated_cost,
+        "provider_name": provider_name,
         "raw_output": raw_output,
+        "budget": budget_status,
     }
 
 
@@ -741,8 +781,14 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
                 intent = str(payload.get("intent", "")).strip()
                 model_name = str(payload.get("model_name", "llama3.2:3b")).strip() or "llama3.2:3b"
+                provider_name = str(payload.get("provider_name", "ollama")).strip() or "ollama"
                 try:
-                    preview = _build_dry_run_preview(intent, agent_id=agent_id, model_name=model_name)
+                    preview = _build_dry_run_preview(
+                        intent,
+                        agent_id=agent_id,
+                        model_name=model_name,
+                        provider_name=provider_name,
+                    )
                 except ValueError as exc:
                     self._json_response({"status": "failed", "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
@@ -1435,7 +1481,8 @@ def _render_html(workflows: list[str]) -> str:
         body: JSON.stringify({{
           intent: document.getElementById('prompt').value,
           agent_id: document.getElementById('agent').value,
-          model_name: document.getElementById('model').value
+          model_name: document.getElementById('model').value,
+          provider_name: document.getElementById('primary_provider').value || 'ollama'
         }})
       }});
       const data = await response.json();
@@ -1509,7 +1556,8 @@ def _render_html(workflows: list[str]) -> str:
         body: JSON.stringify({{
           intent: prompt,
           agent_id: document.getElementById('agent').value,
-          model_name: document.getElementById('model').value
+          model_name: document.getElementById('model').value,
+          provider_name: document.getElementById('primary_provider').value || 'ollama'
         }})
       }});
       const data = await response.json();

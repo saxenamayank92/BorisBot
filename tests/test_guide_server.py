@@ -9,6 +9,8 @@ from borisbot.guide.server import (
     GuideState,
     _resolve_ollama_install_command,
     _resolve_ollama_start_command,
+    _build_dry_run_preview,
+    _estimate_preview_cost_usd,
     _estimate_tokens,
     _extract_required_tools_from_plan,
     build_action_command,
@@ -112,6 +114,21 @@ class GuideServerCommandTests(unittest.TestCase):
 
     def test_estimate_tokens_non_empty(self) -> None:
         self.assertGreaterEqual(_estimate_tokens("hello world"), 1)
+
+    def test_estimate_preview_cost_non_ollama(self) -> None:
+        cost = _estimate_preview_cost_usd("openai", 1000, 1000)
+        self.assertGreater(cost, 0.0)
+
+    def test_build_dry_run_preview_budget_blocked(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": True}):
+            preview = _build_dry_run_preview(
+                "open page",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="openai",
+            )
+        self.assertEqual(preview["status"], "failed")
+        self.assertEqual(preview["error_code"], "BUDGET_BLOCKED")
 
     def test_record_rejects_invalid_url(self) -> None:
         with self.assertRaises(ValueError):
