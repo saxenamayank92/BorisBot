@@ -3,6 +3,7 @@ import json
 import typer
 import uvicorn
 import subprocess
+import shutil
 import os
 import sys
 import time
@@ -24,6 +25,8 @@ from borisbot.guide.server import (
     _build_dry_run_preview,
     _collect_runtime_status,
     _probe_provider_connection,
+    _resolve_ollama_install_command,
+    _resolve_ollama_start_command,
     run_guide_server,
 )
 from borisbot.browser.actions import BrowserActions
@@ -275,6 +278,65 @@ def plan_preview(
     typer.echo(f"  commands: {command_count}")
     typer.echo(f"  tokens_est: {total_tokens}")
     typer.echo(f"  cost_est_usd: ${cost:.4f}")
+
+
+def _run_setup_command(command: list[str]) -> tuple[int, str]:
+    """Run setup command and return (returncode, combined output)."""
+    result = subprocess.run(command, capture_output=True, text=True)
+    output = (result.stdout or "") + (result.stderr or "")
+    return int(result.returncode), output.strip()
+
+
+@app.command("llm-setup")
+def llm_setup(
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+    auto_install: bool = typer.Option(
+        True,
+        "--auto-install/--no-auto-install",
+        help="Install Ollama automatically if missing",
+    ),
+):
+    """Install/start Ollama and pull selected model in one flow."""
+    model = model_name.strip() or "llama3.2:3b"
+    ollama_installed = shutil.which("ollama") is not None
+    if not ollama_installed and not auto_install:
+        typer.echo("LLM SETUP: FAIL")
+        typer.echo("  error: OLLAMA_NOT_INSTALLED")
+        typer.echo("  hint: rerun with --auto-install or install from https://ollama.com/download")
+        raise typer.Exit(code=1)
+
+    if not ollama_installed:
+        install_cmd = _resolve_ollama_install_command(sys.platform)
+        rc, output = _run_setup_command(install_cmd)
+        if rc != 0:
+            typer.echo("LLM SETUP: FAIL")
+            typer.echo("  step: install")
+            typer.echo(f"  command: {' '.join(install_cmd)}")
+            typer.echo(f"  output: {output or 'no output'}")
+            raise typer.Exit(code=1)
+
+    start_cmd = _resolve_ollama_start_command(sys.platform)
+    start_rc, start_output = _run_setup_command(start_cmd)
+    if start_rc != 0:
+        typer.echo("LLM SETUP: FAIL")
+        typer.echo("  step: start")
+        typer.echo(f"  command: {' '.join(start_cmd)}")
+        typer.echo(f"  output: {start_output or 'no output'}")
+        raise typer.Exit(code=1)
+
+    pull_cmd = ["ollama", "pull", model]
+    pull_rc, pull_output = _run_setup_command(pull_cmd)
+    if pull_rc != 0:
+        typer.echo("LLM SETUP: FAIL")
+        typer.echo("  step: pull")
+        typer.echo(f"  command: {' '.join(pull_cmd)}")
+        typer.echo(f"  output: {pull_output or 'no output'}")
+        raise typer.Exit(code=1)
+
+    typer.echo("LLM SETUP: OK")
+    typer.echo(f"  model: {model}")
+    typer.echo(f"  start: {' '.join(start_cmd)}")
+    typer.echo(f"  pull: {' '.join(pull_cmd)}")
 
 
 @app.command("assistant-chat")

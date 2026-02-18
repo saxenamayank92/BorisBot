@@ -26,6 +26,9 @@ borisbot stop
 # Launch guided web UI (beginner flow)
 borisbot guide
 
+# One-command Ollama setup (install/start/pull)
+borisbot llm-setup --model llama3.2:3b
+
 # Show provider/token/budget runtime status
 borisbot session-status
 
