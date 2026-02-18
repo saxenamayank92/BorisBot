@@ -192,6 +192,22 @@ class GuideServerCommandTests(unittest.TestCase):
         stages = got.get("stages", [])
         self.assertGreaterEqual(len(stages), 2)
 
+    def test_list_trace_summaries_reports_stage_count(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        trace = state.add_plan_trace(
+            agent_id="default",
+            model_name="llama3.2:3b",
+            intent="do y",
+            preview={"status": "ok"},
+        )
+        state.append_trace_stage(trace["trace_id"], {"event": "planner_validated"})
+        summaries = state.list_trace_summaries()
+        self.assertTrue(summaries)
+        latest = summaries[0]
+        self.assertEqual(latest["trace_id"], trace["trace_id"])
+        self.assertEqual(latest["stage_count"], 2)
+        self.assertEqual(latest["last_event"], "planner_validated")
+
 
 if __name__ == "__main__":
     unittest.main()

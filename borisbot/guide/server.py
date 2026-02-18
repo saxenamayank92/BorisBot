@@ -394,6 +394,28 @@ class GuideState:
         with self._lock:
             return list(reversed(self._traces[-30:]))
 
+    def list_trace_summaries(self) -> list[dict]:
+        """Return compact summaries for recent traces."""
+        traces = self.list_traces()
+        summaries: list[dict] = []
+        for trace in traces:
+            stages = trace.get("stages", [])
+            last_event = "unknown"
+            if isinstance(stages, list) and stages:
+                last = stages[-1]
+                if isinstance(last, dict):
+                    last_event = str(last.get("event", "unknown"))
+            summaries.append(
+                {
+                    "trace_id": str(trace.get("trace_id", "")),
+                    "type": str(trace.get("type", "")),
+                    "created_at": str(trace.get("created_at", "")),
+                    "stage_count": len(stages) if isinstance(stages, list) else 0,
+                    "last_event": last_event,
+                }
+            )
+        return summaries
+
     def add_plan_trace(self, *, agent_id: str, model_name: str, intent: str, preview: dict) -> dict:
         """Append dry-run planner trace entry."""
         with self._lock:
@@ -557,7 +579,15 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 self._json_response({"agent_id": agent_id, "permissions": matrix})
                 return
             if self.path == "/api/traces":
-                self._json_response({"items": state.list_traces()})
+                self._json_response({"items": state.list_trace_summaries()})
+                return
+            if self.path.startswith("/api/traces/"):
+                trace_id = self.path.split("/")[-1]
+                trace = state.get_trace(trace_id)
+                if not isinstance(trace, dict):
+                    self._json_response({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                self._json_response(trace)
                 return
             if self.path.startswith("/api/jobs/"):
                 job_id = self.path.split("/")[-1]
@@ -1015,6 +1045,11 @@ def _render_html(workflows: list[str]) -> str:
         </div>
         <div class="job-meta" id="meta">No command running.</div>
         <pre id="plan-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
+        <div class="actions" style="margin-bottom:8px;">
+          <select id="trace-select" style="flex:1;min-width:240px;" onchange="loadSelectedTrace()"></select>
+          <button class="secondary" onclick="loadSelectedTrace()">View Trace</button>
+          <button onclick="exportSelectedTrace()">Export Trace JSON</button>
+        </div>
         <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
         <a class="browser-link" id="browser-link" href="#" target="_blank" style="display:none;"></a>
         <div class="viewer-toolbar">
@@ -1315,12 +1350,64 @@ def _render_html(workflows: list[str]) -> str:
         if (!response.ok) return;
         const data = await response.json();
         const items = Array.isArray(data.items) ? data.items : [];
-        const latest = items.slice(0, 3);
-        document.getElementById('trace-output').textContent = latest.length
-          ? JSON.stringify(latest, null, 2)
-          : 'No traces yet.';
+        const select = document.getElementById('trace-select');
+        if (!items.length) {{
+          select.innerHTML = '<option value="">No traces yet</option>';
+          document.getElementById('trace-output').textContent = 'No traces yet.';
+          return;
+        }}
+        const previous = select.value;
+        select.innerHTML = items.map(item => {{
+          const label = `${{item.trace_id}} | ${{item.type}} | stages=${{item.stage_count}} | last=${{item.last_event}}`;
+          const selected = (previous && previous === item.trace_id) || (!previous && item === items[0]);
+          return `<option value="${{item.trace_id}}" ${{selected ? 'selected' : ''}}>${{label}}</option>`;
+        }}).join('');
+        await loadSelectedTrace();
       }} catch (e) {{
         // keep existing trace view on fetch failures
+      }}
+    }}
+
+    async function loadSelectedTrace() {{
+      const select = document.getElementById('trace-select');
+      const traceId = select.value;
+      if (!traceId) return;
+      try {{
+        const response = await fetch(`/api/traces/${{encodeURIComponent(traceId)}}`);
+        if (!response.ok) {{
+          document.getElementById('trace-output').textContent = 'Failed to load trace details.';
+          return;
+        }}
+        const trace = await response.json();
+        document.getElementById('trace-output').textContent = JSON.stringify(trace, null, 2);
+      }} catch (e) {{
+        document.getElementById('trace-output').textContent = 'Failed to load trace details.';
+      }}
+    }}
+
+    async function exportSelectedTrace() {{
+      const select = document.getElementById('trace-select');
+      const traceId = select.value;
+      if (!traceId) return;
+      try {{
+        const response = await fetch(`/api/traces/${{encodeURIComponent(traceId)}}`);
+        if (!response.ok) {{
+          document.getElementById('meta').textContent = 'Trace export failed.';
+          return;
+        }}
+        const trace = await response.json();
+        const blob = new Blob([JSON.stringify(trace, null, 2)], {{ type: 'application/json' }});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${{traceId}}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        document.getElementById('meta').textContent = `Trace exported: ${{traceId}}.json`;
+      }} catch (e) {{
+        document.getElementById('meta').textContent = 'Trace export failed.';
       }}
     }}
 
