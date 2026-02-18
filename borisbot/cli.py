@@ -29,6 +29,12 @@ from borisbot.guide.server import (
     _resolve_ollama_start_command,
     run_guide_server,
 )
+from borisbot.guide.chat_history_store import (
+    append_chat_message,
+    clear_chat_history,
+    clear_chat_roles,
+    load_chat_history,
+)
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
 from borisbot.browser.executor import BrowserExecutor
@@ -416,6 +422,11 @@ def assistant_chat(
         "--approve-permission",
         help="Approve assistant tool permission when agent policy is prompt",
     ),
+    save_history: bool = typer.Option(
+        True,
+        "--save-history/--no-save-history",
+        help="Persist user/assistant chat messages to local history",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print full JSON assistant payload"),
 ):
     """Run general LLM assistant chat using provider fallback and budget checks."""
@@ -429,6 +440,8 @@ def assistant_chat(
         provider_name = "ollama"
     if not isinstance(approve_permission, bool):
         approve_permission = False
+    if not isinstance(save_history, bool):
+        save_history = True
     if not isinstance(json_output, bool):
         json_output = False
 
@@ -455,6 +468,13 @@ def assistant_chat(
         model_name=model_name,
         provider_name=provider_name,
     )
+    if payload.get("status") == "ok" and save_history:
+        assistant_message = str(payload.get("message", "")).strip()
+        if prompt.strip():
+            append_chat_message(agent_id, "assistant_user", prompt.strip())
+        if assistant_message:
+            append_chat_message(agent_id, "assistant", assistant_message)
+
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         if payload.get("status") != "ok":
@@ -484,6 +504,50 @@ def assistant_chat(
     typer.echo(f"  cost_est_usd: ${cost:.4f}")
     typer.echo("")
     typer.echo(message)
+
+
+@app.command("chat-history")
+def chat_history(
+    agent_id: str = typer.Option("default", "--agent-id"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Print persisted chat history for an agent."""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(json_output, bool):
+        json_output = False
+    agent = agent_id.strip() or "default"
+    items = load_chat_history(agent)
+    if json_output:
+        typer.echo(json.dumps({"agent_id": agent, "items": items}, indent=2))
+        return
+    typer.echo(f"CHAT HISTORY ({agent})")
+    if not items:
+        typer.echo("  (empty)")
+        return
+    for row in items:
+        role = str(row.get("role", "")).strip() or "unknown"
+        text = str(row.get("text", "")).strip()
+        typer.echo(f"  [{role}] {text}")
+
+
+@app.command("chat-clear")
+def chat_clear(
+    agent_id: str = typer.Option("default", "--agent-id"),
+    assistant_only: bool = typer.Option(False, "--assistant-only"),
+):
+    """Clear persisted chat history for an agent."""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(assistant_only, bool):
+        assistant_only = False
+    agent = agent_id.strip() or "default"
+    if assistant_only:
+        clear_chat_roles(agent, {"assistant_user", "assistant"})
+        typer.echo(f"CHAT CLEAR: OK ({agent}, assistant_only=true)")
+        return
+    clear_chat_history(agent)
+    typer.echo(f"CHAT CLEAR: OK ({agent}, assistant_only=false)")
 
 
 @app.command("provider-status")

@@ -13,6 +13,8 @@ import typer
 from borisbot.cli import (
     _load_and_validate_workflow,
     assistant_chat,
+    chat_clear,
+    chat_history,
     llm_setup,
     lint_workflow,
     plan_preview,
@@ -269,7 +271,7 @@ class CliWorkflowContractTests(unittest.TestCase):
                 "token_estimate": {"total_tokens": 12},
                 "cost_estimate_usd": 0.0,
             },
-        ):
+        ), mock.patch("borisbot.cli.append_chat_message"):
             output = io.StringIO()
             with redirect_stdout(output):
                 assistant_chat("say hi", json_output=False)
@@ -310,12 +312,48 @@ class CliWorkflowContractTests(unittest.TestCase):
                 "token_estimate": {"total_tokens": 1},
                 "cost_estimate_usd": 0.0,
             },
-        ):
+        ), mock.patch("borisbot.cli.append_chat_message"):
             output = io.StringIO()
             with redirect_stdout(output):
                 assistant_chat("say hi", approve_permission=True, json_output=False)
             set_perm.assert_called_once()
             self.assertIn("ASSISTANT CHAT: OK", output.getvalue())
+
+    def test_assistant_chat_no_save_history(self) -> None:
+        with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="allow"), mock.patch(
+            "borisbot.cli._build_assistant_response",
+            return_value={
+                "status": "ok",
+                "provider_name": "ollama",
+                "message": "hello",
+                "token_estimate": {"total_tokens": 1},
+                "cost_estimate_usd": 0.0,
+            },
+        ), mock.patch("borisbot.cli.append_chat_message") as append_mock:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assistant_chat("say hi", save_history=False, json_output=False)
+            append_mock.assert_not_called()
+
+    def test_chat_history_json(self) -> None:
+        with mock.patch(
+            "borisbot.cli.load_chat_history",
+            return_value=[{"role": "assistant", "text": "hello"}],
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                chat_history(agent_id="default", json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["agent_id"], "default")
+            self.assertEqual(len(payload["items"]), 1)
+
+    def test_chat_clear_assistant_only(self) -> None:
+        with mock.patch("borisbot.cli.clear_chat_roles") as clear_roles:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                chat_clear(agent_id="default", assistant_only=True)
+            clear_roles.assert_called_once()
+            self.assertIn("assistant_only=true", output.getvalue())
 
     def test_llm_setup_fails_when_missing_without_auto_install(self) -> None:
         with mock.patch("borisbot.cli.shutil.which", return_value=None):
