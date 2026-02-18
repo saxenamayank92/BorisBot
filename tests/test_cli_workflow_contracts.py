@@ -352,6 +352,33 @@ class CliWorkflowContractTests(unittest.TestCase):
             self.assertEqual(cm.exception.exit_code, 1)
             self.assertIn("unsupported platform", output.getvalue())
 
+    def test_llm_setup_json_success_payload(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value="/usr/bin/ollama"), mock.patch(
+            "borisbot.cli._resolve_ollama_start_command",
+            return_value=["ollama", "serve"],
+        ), mock.patch(
+            "borisbot.cli._run_setup_command",
+            side_effect=[(0, "started"), (0, "pulled")],
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                llm_setup(model_name="llama3.2:3b", auto_install=True, json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["model"], "llama3.2:3b")
+            self.assertEqual(len(payload["steps"]), 2)
+
+    def test_llm_setup_json_fail_payload(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value=None):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    llm_setup(model_name="llama3.2:3b", auto_install=False, json_output=True)
+            self.assertEqual(cm.exception.exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["error"], "OLLAMA_NOT_INSTALLED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -302,49 +302,102 @@ def llm_setup(
         "--auto-install/--no-auto-install",
         help="Install Ollama automatically if missing",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Print structured setup result"),
 ):
     """Install/start Ollama and pull selected model in one flow."""
+    if not isinstance(model_name, str):
+        model_name = "llama3.2:3b"
+    if not isinstance(auto_install, bool):
+        auto_install = True
+    if not isinstance(json_output, bool):
+        json_output = False
+
     model = model_name.strip() or "llama3.2:3b"
+    payload: dict[str, object] = {
+        "status": "failed",
+        "model": model,
+        "steps": [],
+    }
+
+    def _add_step(step: str, command: list[str] | None, status: str, output: str = "") -> None:
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            return
+        steps.append(
+            {
+                "step": step,
+                "command": " ".join(command) if isinstance(command, list) else "",
+                "status": status,
+                "output": output.strip(),
+            }
+        )
+
+    def _fail(exit_code: int = 1) -> None:
+        if json_output:
+            typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(code=exit_code)
+
     ollama_installed = shutil.which("ollama") is not None
     if not ollama_installed and not auto_install:
-        typer.echo("LLM SETUP: FAIL")
-        typer.echo("  error: OLLAMA_NOT_INSTALLED")
-        typer.echo("  hint: rerun with --auto-install or install from https://ollama.com/download")
-        raise typer.Exit(code=1)
+        payload["error"] = "OLLAMA_NOT_INSTALLED"
+        payload["message"] = "rerun with --auto-install or install from https://ollama.com/download"
+        if not json_output:
+            typer.echo("LLM SETUP: FAIL")
+            typer.echo("  error: OLLAMA_NOT_INSTALLED")
+            typer.echo("  hint: rerun with --auto-install or install from https://ollama.com/download")
+        _fail(1)
 
     if not ollama_installed:
         try:
             install_cmd = _resolve_ollama_install_command(sys.platform)
         except ValueError as exc:
-            typer.echo("LLM SETUP: FAIL")
-            typer.echo("  step: install")
-            typer.echo(f"  error: {exc}")
-            raise typer.Exit(code=1)
+            payload["error"] = "INSTALL_COMMAND_UNAVAILABLE"
+            payload["message"] = str(exc)
+            _add_step("install", None, "failed", str(exc))
+            if not json_output:
+                typer.echo("LLM SETUP: FAIL")
+                typer.echo("  step: install")
+                typer.echo(f"  error: {exc}")
+            _fail(1)
         rc, output = _run_setup_command(install_cmd)
+        _add_step("install", install_cmd, "completed" if rc == 0 else "failed", output)
         if rc != 0:
-            typer.echo("LLM SETUP: FAIL")
-            typer.echo("  step: install")
-            typer.echo(f"  command: {' '.join(install_cmd)}")
-            typer.echo(f"  output: {output or 'no output'}")
-            raise typer.Exit(code=1)
+            payload["error"] = "INSTALL_FAILED"
+            if not json_output:
+                typer.echo("LLM SETUP: FAIL")
+                typer.echo("  step: install")
+                typer.echo(f"  command: {' '.join(install_cmd)}")
+                typer.echo(f"  output: {output or 'no output'}")
+            _fail(1)
 
     start_cmd = _resolve_ollama_start_command(sys.platform)
     start_rc, start_output = _run_setup_command(start_cmd)
+    _add_step("start", start_cmd, "completed" if start_rc == 0 else "failed", start_output)
     if start_rc != 0:
-        typer.echo("LLM SETUP: FAIL")
-        typer.echo("  step: start")
-        typer.echo(f"  command: {' '.join(start_cmd)}")
-        typer.echo(f"  output: {start_output or 'no output'}")
-        raise typer.Exit(code=1)
+        payload["error"] = "START_FAILED"
+        if not json_output:
+            typer.echo("LLM SETUP: FAIL")
+            typer.echo("  step: start")
+            typer.echo(f"  command: {' '.join(start_cmd)}")
+            typer.echo(f"  output: {start_output or 'no output'}")
+        _fail(1)
 
     pull_cmd = ["ollama", "pull", model]
     pull_rc, pull_output = _run_setup_command(pull_cmd)
+    _add_step("pull", pull_cmd, "completed" if pull_rc == 0 else "failed", pull_output)
     if pull_rc != 0:
-        typer.echo("LLM SETUP: FAIL")
-        typer.echo("  step: pull")
-        typer.echo(f"  command: {' '.join(pull_cmd)}")
-        typer.echo(f"  output: {pull_output or 'no output'}")
-        raise typer.Exit(code=1)
+        payload["error"] = "PULL_FAILED"
+        if not json_output:
+            typer.echo("LLM SETUP: FAIL")
+            typer.echo("  step: pull")
+            typer.echo(f"  command: {' '.join(pull_cmd)}")
+            typer.echo(f"  output: {pull_output or 'no output'}")
+        _fail(1)
+
+    payload["status"] = "ok"
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
 
     typer.echo("LLM SETUP: OK")
     typer.echo(f"  model: {model}")

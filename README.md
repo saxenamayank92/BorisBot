@@ -28,6 +28,8 @@ borisbot guide
 
 # One-command Ollama setup (install/start/pull)
 borisbot llm-setup --model llama3.2:3b
+# Machine-readable setup output
+borisbot llm-setup --model llama3.2:3b --json
 
 # Show provider/token/budget runtime status
 borisbot session-status
