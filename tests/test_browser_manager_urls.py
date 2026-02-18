@@ -2,7 +2,11 @@
 
 import unittest
 
-from borisbot.supervisor.browser_manager import _is_missing_container_error, build_novnc_url
+from borisbot.supervisor.browser_manager import (
+    _is_missing_container_error,
+    _is_non_running_container_error,
+    build_novnc_url,
+)
 
 
 class BrowserManagerUrlTests(unittest.TestCase):
@@ -18,6 +22,10 @@ class BrowserManagerUrlTests(unittest.TestCase):
     def test_is_missing_container_error(self) -> None:
         self.assertTrue(_is_missing_container_error("Error: No such container: abc"))
         self.assertFalse(_is_missing_container_error("permission denied"))
+
+    def test_is_non_running_container_error(self) -> None:
+        self.assertTrue(_is_non_running_container_error("Error response from daemon: Container abc is not running"))
+        self.assertFalse(_is_non_running_container_error("permission denied"))
 
 
 if __name__ == "__main__":

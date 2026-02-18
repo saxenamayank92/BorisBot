@@ -34,6 +34,12 @@ def _is_missing_container_error(stderr: str) -> bool:
     return "no such container" in (stderr or "").strip().lower()
 
 
+def _is_non_running_container_error(stderr: str) -> bool:
+    """Return True when docker stderr says container exists but is not running."""
+    text = (stderr or "").strip().lower()
+    return "is not running" in text or "container is not running" in text
+
+
 class BrowserManager:
     """Coordinates browser session allocation and lifecycle for agents."""
 
@@ -428,12 +434,15 @@ class BrowserManager:
             if stop_result.stderr:
                 logger.info("Docker stop stderr: %s", stop_result.stderr.strip())
             stderr = (stop_result.stderr or "").strip()
-            if stop_result.returncode != 0 and not _is_missing_container_error(stderr):
+            benign_stop_error = _is_missing_container_error(stderr) or _is_non_running_container_error(
+                stderr
+            )
+            if stop_result.returncode != 0 and not benign_stop_error:
                 raise RuntimeError(
                     f"Failed to stop browser container {container_name}: {stderr}"
                 )
             session_status = "stopped"
-            if stop_result.returncode != 0 and _is_missing_container_error(stderr):
+            if stop_result.returncode != 0 and benign_stop_error:
                 session_status = "crashed"
             rm_result = await self._run_command(["docker", "rm", "-f", container_name])
             rm_stderr = (rm_result.stderr or "").strip()
