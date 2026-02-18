@@ -352,11 +352,28 @@ def plan_preview(
     provider_selected = str(preview.get("provider_name", "unknown"))
     commands = preview.get("validated_commands", [])
     command_count = len(commands) if isinstance(commands, list) else 0
+    required_permissions = preview.get("required_permissions", [])
+    if not isinstance(required_permissions, list):
+        required_permissions = []
+    budget_snapshot = preview.get("budget", {})
+    budget_status = (
+        str(budget_snapshot.get("status", "unknown")).upper()
+        if isinstance(budget_snapshot, dict)
+        else "UNKNOWN"
+    )
     typer.echo("PLAN PREVIEW: OK")
     typer.echo(f"  provider: {provider_selected}")
     typer.echo(f"  commands: {command_count}")
     typer.echo(f"  tokens_est: {total_tokens}")
     typer.echo(f"  cost_est_usd: ${cost:.4f}")
+    typer.echo(f"  budget_status: {budget_status}")
+    typer.echo(f"  required_permissions: {len(required_permissions)}")
+    for row in required_permissions:
+        if not isinstance(row, dict):
+            continue
+        tool_name = str(row.get("tool_name", "")).strip() or "unknown"
+        decision = str(row.get("decision", "")).strip() or "unknown"
+        typer.echo(f"    - {tool_name}: {decision}")
 
 
 def _run_setup_command(command: list[str]) -> tuple[int, str]:

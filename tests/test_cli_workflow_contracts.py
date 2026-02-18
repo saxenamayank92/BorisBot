@@ -222,6 +222,11 @@ class CliWorkflowContractTests(unittest.TestCase):
                 "validated_commands": [{"id": "1", "action": "get_title", "params": {}}],
                 "token_estimate": {"total_tokens": 42},
                 "cost_estimate_usd": 0.0,
+                "budget": {"status": "ok"},
+                "required_permissions": [
+                    {"tool_name": "browser", "decision": "allow"},
+                    {"tool_name": "web_fetch", "decision": "prompt"},
+                ],
             },
         ):
             output = io.StringIO()
@@ -230,6 +235,8 @@ class CliWorkflowContractTests(unittest.TestCase):
             text = output.getvalue()
             self.assertIn("PLAN PREVIEW: OK", text)
             self.assertIn("provider: ollama", text)
+            self.assertIn("required_permissions: 2", text)
+            self.assertIn("browser: allow", text)
 
     def test_plan_preview_json_fail_exits_nonzero(self) -> None:
         with mock.patch(
