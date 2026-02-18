@@ -30,6 +30,7 @@ from borisbot.llm.cost_guard import CostGuard
 from borisbot.llm.provider_health import get_provider_health_registry
 from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
+from borisbot.supervisor.profile_config import load_profile, save_profile
 from borisbot.supervisor.tool_permissions import (
     DECISION_ALLOW,
     DECISION_DENY,
@@ -544,6 +545,9 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/runtime-status":
                 self._json_response(state.runtime_status())
                 return
+            if self.path == "/api/profile":
+                self._json_response(load_profile())
+                return
             if self.path == "/api/traces":
                 self._json_response({"items": state.list_traces()})
                 return
@@ -601,6 +605,15 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self._json_response(job.to_dict(), status=HTTPStatus.CREATED)
+                return
+            if self.path == "/api/profile":
+                payload = self._read_json()
+                try:
+                    profile = save_profile(payload)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(profile, status=HTTPStatus.OK)
                 return
             if self.path == "/api/plan-preview":
                 payload = self._read_json()
@@ -892,6 +905,12 @@ def _render_html(workflows: list[str]) -> str:
       <section class="card">
         <label for="workflow">Workflow file</label>
         <select id="workflow">{options}</select>
+        <label for="agent_name">Agent name</label>
+        <input id="agent_name" value="default" />
+        <label for="provider_chain">Provider chain (comma-separated, max 5)</label>
+        <input id="provider_chain" value="ollama" />
+        <label for="primary_provider">Primary provider</label>
+        <input id="primary_provider" value="ollama" />
         <label for="task">New task id for recording</label>
         <input id="task" value="wf_demo" />
         <label for="agent">Agent id</label>
@@ -917,6 +936,7 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('session_status')">Session Status</button>
             <button onclick="runPlanPreview()">Dry-Run Planner</button>
             <button onclick="executeApprovedPlan()">Execute Approved Plan</button>
+            <button onclick="saveProfile()">Save Profile</button>
           </div>
         </div>
 
@@ -1020,6 +1040,50 @@ def _render_html(workflows: list[str]) -> str:
       }}
       currentJobId = data.job_id;
       startPolling();
+    }}
+
+    async function loadProfile() {{
+      try {{
+        const response = await fetch('/api/profile');
+        if (!response.ok) return;
+        const profile = await response.json();
+        document.getElementById('agent_name').value = profile.agent_name || 'default';
+        document.getElementById('primary_provider').value = profile.primary_provider || 'ollama';
+        document.getElementById('provider_chain').value = Array.isArray(profile.provider_chain)
+          ? profile.provider_chain.join(',')
+          : 'ollama';
+        if (profile.model_name) {{
+          document.getElementById('model').value = profile.model_name;
+        }}
+      }} catch (e) {{
+        // ignore profile load failures
+      }}
+    }}
+
+    async function saveProfile() {{
+      const providerChain = document.getElementById('provider_chain').value
+        .split(',')
+        .map(x => x.trim())
+        .filter(Boolean);
+      const payload = {{
+        schema_version: 'profile.v1',
+        agent_name: document.getElementById('agent_name').value || 'default',
+        primary_provider: document.getElementById('primary_provider').value || 'ollama',
+        provider_chain: providerChain.length ? providerChain : ['ollama'],
+        model_name: document.getElementById('model').value || 'llama3.2:3b'
+      }};
+      const response = await fetch('/api/profile', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(payload)
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Profile save failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('meta').textContent = 'Profile saved.';
+      refreshRuntimeStatus();
     }}
 
     async function runPlanPreview() {{
@@ -1170,6 +1234,7 @@ def _render_html(workflows: list[str]) -> str:
     }}
 
     setViewMode('split');
+    loadProfile();
     refreshRuntimeStatus();
     refreshTraces();
     setInterval(refreshRuntimeStatus, 5000);
@@ -1205,8 +1270,9 @@ def run_guide_server(
 
 def _collect_runtime_status(python_bin: str) -> dict:
     """Collect runtime status for GUI without requiring CLI invocation."""
-    model_name = os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b")
-    provider_name = "ollama"
+    profile = load_profile()
+    model_name = str(profile.get("model_name", os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b")))
+    provider_name = str(profile.get("primary_provider", "ollama"))
     provider_state = "unknown"
     budget_status = "ok"
     today_cost = 0.0
