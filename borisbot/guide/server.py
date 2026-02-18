@@ -991,6 +991,7 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('ollama_check')">Check Ollama</button>
             <button onclick="runAction('ollama_start')">Start Ollama</button>
             <button onclick="runAction('ollama_pull')">Pull Model</button>
+            <button onclick="runOneTouchLlmSetup()">One-Touch LLM Setup</button>
             <button onclick="runAction('cleanup_sessions')">Reset Browser Sessions</button>
             <button onclick="runAction('verify')">Run Verify</button>
             <button onclick="runAction('session_status')">Session Status</button>
@@ -1116,6 +1117,67 @@ def _render_html(workflows: list[str]) -> str:
       }}
       currentJobId = data.job_id;
       startPolling();
+      return data;
+    }}
+
+    async function waitForJobCompletion(jobId, timeoutMs=180000) {{
+      const started = Date.now();
+      while ((Date.now() - started) < timeoutMs) {{
+        const response = await fetch(`/api/jobs/${{jobId}}`);
+        if (!response.ok) {{
+          throw new Error('job_status_fetch_failed');
+        }}
+        const data = await response.json();
+        document.getElementById('meta').textContent = `[${{data.status}}] ${{data.command}}`;
+        document.getElementById('output').textContent = data.output || '';
+        updateBrowserLink(data.browser_ui_url || '');
+        if (data.status !== 'running') {{
+          return data;
+        }}
+        await new Promise(resolve => setTimeout(resolve, 900));
+      }}
+      throw new Error('job_timeout');
+    }}
+
+    async function runActionAndWait(action) {{
+      const data = await runAction(action);
+      if (!data || !data.job_id) {{
+        throw new Error('job_submit_failed');
+      }}
+      return waitForJobCompletion(data.job_id);
+    }}
+
+    async function runOneTouchLlmSetup() {{
+      document.getElementById('meta').textContent = 'Starting one-touch LLM setup...';
+      try {{
+        const statusResp = await fetch('/api/runtime-status');
+        const status = statusResp.ok ? await statusResp.json() : {{}};
+        if (!status.ollama_installed) {{
+          document.getElementById('meta').textContent = 'Installing Ollama...';
+          const installJob = await runActionAndWait('ollama_install');
+          if (installJob.status !== 'completed') {{
+            document.getElementById('meta').textContent = 'Ollama install failed. Review terminal output.';
+            return;
+          }}
+        }}
+        document.getElementById('meta').textContent = 'Starting Ollama runtime...';
+        const startJob = await runActionAndWait('ollama_start');
+        if (startJob.status !== 'completed') {{
+          document.getElementById('meta').textContent = 'Ollama start failed. Review terminal output.';
+          return;
+        }}
+        document.getElementById('meta').textContent = 'Pulling selected model...';
+        const pullJob = await runActionAndWait('ollama_pull');
+        if (pullJob.status !== 'completed') {{
+          document.getElementById('meta').textContent = 'Model pull failed. Review terminal output.';
+          return;
+        }}
+        await runActionAndWait('session_status');
+        document.getElementById('meta').textContent = 'One-touch LLM setup completed.';
+        refreshRuntimeStatus();
+      }} catch (e) {{
+        document.getElementById('meta').textContent = 'One-touch setup failed unexpectedly.';
+      }}
     }}
 
     async function loadProfile() {{

@@ -13,6 +13,7 @@ from borisbot.guide.server import (
     _extract_required_tools_from_plan,
     build_action_command,
     extract_browser_ui_url,
+    _render_html,
     required_tool_for_action,
 )
 
@@ -207,6 +208,11 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(latest["trace_id"], trace["trace_id"])
         self.assertEqual(latest["stage_count"], 2)
         self.assertEqual(latest["last_event"], "planner_validated")
+
+    def test_render_html_includes_one_touch_setup(self) -> None:
+        html = _render_html(["workflows/sample.json"])
+        self.assertIn("One-Touch LLM Setup", html)
+        self.assertIn("runOneTouchLlmSetup()", html)
 
 
 if __name__ == "__main__":
