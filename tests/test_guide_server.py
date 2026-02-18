@@ -552,6 +552,7 @@ class GuideServerCommandTests(unittest.TestCase):
         html = _render_html(["workflows/sample.json"])
         self.assertIn("One-Touch LLM Setup", html)
         self.assertIn("runOneTouchLlmSetup()", html)
+        self.assertIn("One-touch setup failed:", html)
         self.assertIn("Planner Chat", html)
         self.assertIn("sendChatPrompt()", html)
         self.assertIn("Provider Onboarding", html)

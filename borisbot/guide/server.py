@@ -2149,8 +2149,29 @@ def _render_html(workflows: list[str]) -> str:
         }} catch (e) {{
           payload = null;
         }}
-        if (!payload || payload.status !== 'ok') {{
-          document.getElementById('meta').textContent = 'One-touch setup failed. Review terminal output.';
+        if (!payload) {{
+          document.getElementById('meta').textContent = 'One-touch setup failed. Invalid setup payload.';
+          return;
+        }}
+        const steps = Array.isArray(payload.steps) ? payload.steps : [];
+        const lines = [];
+        for (const step of steps) {{
+          if (!step || typeof step !== 'object') continue;
+          const name = step.step || 'step';
+          const status = step.status || 'unknown';
+          const cmd = step.command || '';
+          lines.push(`[${{status}}] ${{name}}${{cmd ? ' :: ' + cmd : ''}}`);
+          if (step.output) {{
+            lines.push(String(step.output));
+          }}
+        }}
+        if (lines.length) {{
+          document.getElementById('output').textContent = lines.join('\n');
+        }}
+        if (payload.status !== 'ok') {{
+          const errorCode = payload.error || 'SETUP_FAILED';
+          const message = payload.message || 'Review terminal output.';
+          document.getElementById('meta').textContent = `One-touch setup failed: ${{errorCode}} (${{message}})`;
           return;
         }}
         document.getElementById('meta').textContent = 'One-touch LLM setup completed.';
