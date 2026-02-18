@@ -32,6 +32,7 @@ from borisbot.llm.provider_health import get_provider_health_registry
 from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
 from borisbot.supervisor.profile_config import load_profile, save_profile
+from borisbot.supervisor.provider_secrets import get_secret_status, set_provider_secret
 from borisbot.supervisor.tool_permissions import (
     ALLOWED_TOOLS,
     DECISION_ALLOW,
@@ -590,6 +591,9 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/profile":
                 self._json_response(load_profile())
                 return
+            if self.path == "/api/provider-secrets":
+                self._json_response({"providers": get_secret_status()})
+                return
             if self.path.startswith("/api/permissions"):
                 query = parse_qs(urlsplit(self.path).query)
                 agent_id = str(query.get("agent_id", ["default"])[0]).strip() or "default"
@@ -670,6 +674,17 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self._json_response(profile, status=HTTPStatus.OK)
+                return
+            if self.path == "/api/provider-secrets":
+                payload = self._read_json()
+                provider = str(payload.get("provider", "")).strip().lower()
+                api_key = str(payload.get("api_key", "")).strip()
+                try:
+                    providers = set_provider_secret(provider, api_key)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response({"providers": providers}, status=HTTPStatus.OK)
                 return
             if self.path == "/api/permissions":
                 payload = self._read_json()
@@ -989,6 +1004,14 @@ def _render_html(workflows: list[str]) -> str:
         <input id="provider_chain" value="ollama" />
         <label for="primary_provider">Primary provider</label>
         <input id="primary_provider" value="ollama" />
+        <div class="step">
+          <h3>Provider Onboarding</h3>
+          <p>Configure primary/fallback providers and API credentials (stored locally).</p>
+          <div id="provider-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;"></div>
+          <div class="actions">
+            <button class="secondary" onclick="refreshProviderSecrets()">Refresh Provider Status</button>
+          </div>
+        </div>
         <label for="task">New task id for recording</label>
         <input id="task" value="wf_demo" />
         <label for="agent">Agent id</label>
@@ -1112,6 +1135,7 @@ def _render_html(workflows: list[str]) -> str:
     let viewMode = 'split';
     let lastPlanTraceId = null;
     let chatHistory = [];
+    const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
 
     function currentParams() {{
       return {{
@@ -1222,12 +1246,36 @@ def _render_html(workflows: list[str]) -> str:
         document.getElementById('provider_chain').value = Array.isArray(profile.provider_chain)
           ? profile.provider_chain.join(',')
           : 'ollama';
+        renderProviderGrid(profile.provider_settings || {{}});
         if (profile.model_name) {{
           document.getElementById('model').value = profile.model_name;
         }}
+        refreshProviderSecrets();
       }} catch (e) {{
         // ignore profile load failures
       }}
+    }}
+
+    function renderProviderGrid(providerSettings) {{
+      const rows = providerNames.map(name => {{
+        const settings = providerSettings[name] || {{}};
+        const enabled = !!settings.enabled;
+        const modelName = settings.model_name || '';
+        const checked = enabled ? 'checked' : '';
+        const secretField = name === 'ollama'
+          ? ''
+          : `<label style="margin:0;">${{name}} API key</label>
+             <input id="provider_key_${{name}}" type="password" placeholder="Paste key (blank keeps existing)" />`;
+        return `
+          <label style="margin:0;">${{name}} enabled</label>
+          <input id="provider_enabled_${{name}}" type="checkbox" ${{checked}} />
+          <label style="margin:0;">${{name}} model</label>
+          <input id="provider_model_${{name}}" value="${{modelName}}" />
+          ${{secretField}}
+          ${{name === 'ollama' ? '' : `<div id="provider_secret_status_${{name}}" style="font-size:12px;color:var(--muted);">status: unknown</div>`}}
+        `;
+      }}).join('');
+      document.getElementById('provider-grid').innerHTML = rows;
     }}
 
     async function saveProfile() {{
@@ -1235,12 +1283,22 @@ def _render_html(workflows: list[str]) -> str:
         .split(',')
         .map(x => x.trim())
         .filter(Boolean);
+      const providerSettings = {{}};
+      for (const provider of providerNames) {{
+        const enabledEl = document.getElementById(`provider_enabled_${{provider}}`);
+        const modelEl = document.getElementById(`provider_model_${{provider}}`);
+        providerSettings[provider] = {{
+          enabled: !!(enabledEl && enabledEl.checked),
+          model_name: modelEl ? (modelEl.value || '').trim() : ''
+        }};
+      }}
       const payload = {{
-        schema_version: 'profile.v1',
+        schema_version: 'profile.v2',
         agent_name: document.getElementById('agent_name').value || 'default',
         primary_provider: document.getElementById('primary_provider').value || 'ollama',
         provider_chain: providerChain.length ? providerChain : ['ollama'],
-        model_name: document.getElementById('model').value || 'llama3.2:3b'
+        model_name: document.getElementById('model').value || 'llama3.2:3b',
+        provider_settings: providerSettings
       }};
       const response = await fetch('/api/profile', {{
         method: 'POST',
@@ -1254,8 +1312,48 @@ def _render_html(workflows: list[str]) -> str:
       }}
       document.getElementById('meta').textContent = 'Profile saved.';
       document.getElementById('agent').value = payload.agent_name;
+      await saveProviderSecrets();
       refreshPermissions();
       refreshRuntimeStatus();
+    }}
+
+    async function refreshProviderSecrets() {{
+      try {{
+        const response = await fetch('/api/provider-secrets');
+        if (!response.ok) return;
+        const data = await response.json();
+        const providers = data.providers || {{}};
+        for (const provider of providerNames) {{
+          if (provider === 'ollama') continue;
+          const statusEl = document.getElementById(`provider_secret_status_${{provider}}`);
+          if (!statusEl) continue;
+          const row = providers[provider] || {{}};
+          const configured = !!row.configured;
+          const masked = row.masked || '';
+          statusEl.textContent = configured ? `status: configured (${{masked}})` : 'status: not configured';
+        }}
+      }} catch (e) {{
+        // ignore provider secret refresh failures
+      }}
+    }}
+
+    async function saveProviderSecrets() {{
+      for (const provider of providerNames) {{
+        if (provider === 'ollama') continue;
+        const keyEl = document.getElementById(`provider_key_${{provider}}`);
+        if (!keyEl) continue;
+        const key = (keyEl.value || '').trim();
+        if (!key) continue;
+        const response = await fetch('/api/provider-secrets', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{ provider, api_key: key }})
+        }});
+        if (response.ok) {{
+          keyEl.value = '';
+        }}
+      }}
+      await refreshProviderSecrets();
     }}
 
     function permissionOptionMarkup(selected) {{

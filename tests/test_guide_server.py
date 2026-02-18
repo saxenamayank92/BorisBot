@@ -229,6 +229,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("runOneTouchLlmSetup()", html)
         self.assertIn("Planner Chat", html)
         self.assertIn("sendChatPrompt()", html)
+        self.assertIn("Provider Onboarding", html)
+        self.assertIn("refreshProviderSecrets()", html)
 
 
 if __name__ == "__main__":

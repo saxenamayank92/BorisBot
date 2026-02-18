@@ -9,15 +9,24 @@ from typing import Any
 PROFILE_PATH = Path.home() / ".borisbot" / "profile.json"
 ALLOWED_PROVIDERS = {"ollama", "openai", "anthropic", "google", "azure"}
 MAX_PROVIDER_CHAIN = 5
+PROFILE_SCHEMA_VERSION = "profile.v2"
+
+
+def _default_provider_settings() -> dict[str, dict[str, Any]]:
+    settings: dict[str, dict[str, Any]] = {}
+    for provider in sorted(ALLOWED_PROVIDERS):
+        settings[provider] = {"enabled": provider == "ollama", "model_name": ""}
+    return settings
 
 
 def default_profile() -> dict[str, Any]:
     return {
-        "schema_version": "profile.v1",
+        "schema_version": PROFILE_SCHEMA_VERSION,
         "agent_name": "default",
         "primary_provider": "ollama",
         "provider_chain": ["ollama"],
         "model_name": "llama3.2:3b",
+        "provider_settings": _default_provider_settings(),
     }
 
 
@@ -25,8 +34,8 @@ def validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
     """Validate profile schema and provider chain constraints."""
     if not isinstance(profile, dict):
         raise ValueError("profile must be object")
-    schema_version = profile.get("schema_version", "profile.v1")
-    if schema_version != "profile.v1":
+    schema_version = profile.get("schema_version", PROFILE_SCHEMA_VERSION)
+    if schema_version not in {"profile.v1", PROFILE_SCHEMA_VERSION}:
         raise ValueError("unsupported profile schema_version")
     agent_name = str(profile.get("agent_name", "default")).strip() or "default"
     model_name = str(profile.get("model_name", "llama3.2:3b")).strip() or "llama3.2:3b"
@@ -45,12 +54,34 @@ def validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
     primary_provider = str(profile.get("primary_provider", normalized_chain[0])).strip().lower()
     if primary_provider not in normalized_chain:
         raise ValueError("primary_provider must exist in provider_chain")
+    provider_settings_raw = profile.get("provider_settings", {})
+    if provider_settings_raw is None:
+        provider_settings_raw = {}
+    if not isinstance(provider_settings_raw, dict):
+        raise ValueError("provider_settings must be object")
+    provider_settings = _default_provider_settings()
+    for provider_name, setting in provider_settings_raw.items():
+        name = str(provider_name).strip().lower()
+        if name not in ALLOWED_PROVIDERS:
+            continue
+        if not isinstance(setting, dict):
+            continue
+        enabled = bool(setting.get("enabled", provider_settings[name]["enabled"]))
+        model_name_value = str(setting.get("model_name", "")).strip()
+        provider_settings[name] = {
+            "enabled": enabled,
+            "model_name": model_name_value,
+        }
+    for provider in normalized_chain:
+        if provider != "ollama":
+            provider_settings[provider]["enabled"] = True
     return {
-        "schema_version": "profile.v1",
+        "schema_version": PROFILE_SCHEMA_VERSION,
         "agent_name": agent_name,
         "primary_provider": primary_provider,
         "provider_chain": normalized_chain,
         "model_name": model_name,
+        "provider_settings": provider_settings,
     }
 
 
@@ -76,4 +107,3 @@ def save_profile(profile: dict[str, Any], path: Path = PROFILE_PATH) -> dict[str
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
     return validated
-
