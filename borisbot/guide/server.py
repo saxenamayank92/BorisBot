@@ -1033,7 +1033,7 @@ def _render_html(workflows: list[str]) -> str:
     }}
     .step {{ margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }}
     .step:first-child {{ border-top: 0; margin-top: 0; padding-top: 0; }}
-    .step h3 {{ margin: 0 0 6px; font-size: 17px; }}
+    .step h3 {{ margin: 0 0 6px; font-size: 17px; letter-spacing: 0.02em; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }}
     button {{
       border: 0;
@@ -1121,6 +1121,25 @@ def _render_html(workflows: list[str]) -> str:
       margin-bottom: 8px;
       display: block;
       word-break: break-all;
+    }}
+    .hover-card {{
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+    }}
+    .hover-card:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 10px 18px rgba(54, 85, 100, 0.16);
+      border-color: #89aeb9;
+    }}
+    .provider-cards {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }}
+    .provider-card {{
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
     }}
     .job-meta {{ font-size: 13px; color: var(--muted); margin-bottom: 8px; }}
     @media (max-width: 920px) {{
@@ -1234,7 +1253,7 @@ def _render_html(workflows: list[str]) -> str:
         <div class="step" style="margin-top:0;padding-top:0;border-top:0;">
           <h3>Runtime Status</h3>
           <p id="runtime-line">Loading...</p>
-          <div id="provider-cards" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;"></div>
+          <div id="provider-cards" class="provider-cards"></div>
         </div>
         <div class="job-meta" id="meta">No command running.</div>
         <pre id="plan-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
@@ -1766,7 +1785,7 @@ def _render_html(workflows: list[str]) -> str:
           const reason = row.reason ? ` | reason=${{row.reason}}` : '';
           const model = row.model_name ? ` | model=${{row.model_name}}` : '';
           const bg = usable ? '#e7f6ef' : '#fff3ea';
-          return `<div title="enabled=${{!!row.enabled}}, configured=${{!!row.configured}}${{reason}}${{model}}" style="border:1px solid var(--border);border-radius:10px;padding:8px;background:${{bg}};">
+          return `<div class="provider-card hover-card" title="enabled=${{!!row.enabled}}, configured=${{!!row.configured}}${{reason}}${{model}}" style="background:${{bg}};">
             <strong>${{name}}</strong><br/>
             <span style="font-size:12px;color:var(--muted);">enabled=${{!!row.enabled}} | configured=${{!!row.configured}} | usable=${{usable}}</span>
           </div>`;
