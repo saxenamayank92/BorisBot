@@ -129,6 +129,8 @@ ACTION_TOOL_MAP = {
     "docker_info": TOOL_SHELL,
     "cleanup_sessions": TOOL_BROWSER,
     "session_status": TOOL_SHELL,
+    "budget_status": TOOL_SHELL,
+    "budget_set": TOOL_SHELL,
     "doctor": TOOL_SHELL,
     "ollama_check": TOOL_SHELL,
     "ollama_install": TOOL_SHELL,
@@ -1076,6 +1078,26 @@ def build_action_command(
         return [python_bin, "-m", "borisbot.cli", "cleanup-browsers"]
     if action == "session_status":
         return [python_bin, "-m", "borisbot.cli", "session-status"]
+    if action == "budget_status":
+        agent = params.get("agent_id", "").strip() or "default"
+        return [python_bin, "-m", "borisbot.cli", "budget-status", "--agent-id", agent]
+    if action == "budget_set":
+        cmd = [python_bin, "-m", "borisbot.cli", "budget-set"]
+        system_limit = params.get("budget_system_daily", "").strip()
+        agent_limit = params.get("budget_agent_daily", "").strip()
+        monthly_limit = params.get("budget_monthly", "").strip()
+        if system_limit:
+            float(system_limit)
+            cmd.extend(["--system-daily-limit-usd", system_limit])
+        if agent_limit:
+            float(agent_limit)
+            cmd.extend(["--agent-daily-limit-usd", agent_limit])
+        if monthly_limit:
+            float(monthly_limit)
+            cmd.extend(["--monthly-limit-usd", monthly_limit])
+        if len(cmd) == 4:
+            raise ValueError("Set at least one budget value before running budget_set")
+        return cmd
     if action == "doctor":
         model = params.get("model_name", "").strip() or "llama3.2:3b"
         return [python_bin, "-m", "borisbot.cli", "doctor", "--model", model]
@@ -2092,6 +2114,12 @@ def _render_html(workflows: list[str]) -> str:
         <input id="start" value="https://example.com" />
         <label for="model">Ollama model</label>
         <input id="model" value="llama3.2:3b" />
+        <label for="budget_system_daily">System daily budget (USD)</label>
+        <input id="budget_system_daily" value="" placeholder="e.g. 10" />
+        <label for="budget_agent_daily">Agent daily budget (USD)</label>
+        <input id="budget_agent_daily" value="" placeholder="e.g. 5" />
+        <label for="budget_monthly">Monthly budget (USD)</label>
+        <input id="budget_monthly" value="" placeholder="e.g. 100" />
         <label for="prompt">Dry-run planner prompt</label>
         <textarea id="prompt" rows="4" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:10px;">Open LinkedIn feed, scroll a few posts, and like one relevant post.</textarea>
         <div class="step">
@@ -2115,6 +2143,8 @@ def _render_html(workflows: list[str]) -> str:
             <button class="secondary" onclick="runAction('doctor')">Run Doctor</button>
             <button onclick="runAction('verify')">Run Verify</button>
             <button onclick="runAction('session_status')">Session Status</button>
+            <button onclick="runAction('budget_status')">Budget Status</button>
+            <button class="secondary" onclick="runAction('budget_set')">Apply Budget Limits</button>
             <button class="secondary" onclick="showOllamaSetupPlan()">Show Setup Plan</button>
             <button onclick="runPlanPreview()">Dry-Run Planner</button>
             <button class="secondary" onclick="approveRequiredPermissions()">Approve Required Permissions</button>
@@ -2261,6 +2291,9 @@ def _render_html(workflows: list[str]) -> str:
         start_url: document.getElementById('start').value,
         model_name: document.getElementById('model').value
         ,
+        budget_system_daily: document.getElementById('budget_system_daily') ? document.getElementById('budget_system_daily').value : '',
+        budget_agent_daily: document.getElementById('budget_agent_daily') ? document.getElementById('budget_agent_daily').value : '',
+        budget_monthly: document.getElementById('budget_monthly') ? document.getElementById('budget_monthly').value : '',
         policy_name: document.getElementById('policy-pack') ? document.getElementById('policy-pack').value : 'safe-local'
       }};
     }}

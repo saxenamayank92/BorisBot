@@ -145,6 +145,54 @@ class GuideServerCommandTests(unittest.TestCase):
         )
         self.assertEqual(cmd, [sys.executable, "-m", "borisbot.cli", "session-status"])
 
+    def test_budget_status_command(self) -> None:
+        cmd = build_action_command(
+            "budget_status",
+            {"agent_id": "default"},
+            workspace=Path.cwd(),
+            python_bin=sys.executable,
+        )
+        self.assertEqual(
+            cmd,
+            [sys.executable, "-m", "borisbot.cli", "budget-status", "--agent-id", "default"],
+        )
+
+    def test_budget_set_command(self) -> None:
+        cmd = build_action_command(
+            "budget_set",
+            {
+                "budget_system_daily": "10",
+                "budget_agent_daily": "5",
+                "budget_monthly": "100",
+            },
+            workspace=Path.cwd(),
+            python_bin=sys.executable,
+        )
+        self.assertEqual(
+            cmd,
+            [
+                sys.executable,
+                "-m",
+                "borisbot.cli",
+                "budget-set",
+                "--system-daily-limit-usd",
+                "10",
+                "--agent-daily-limit-usd",
+                "5",
+                "--monthly-limit-usd",
+                "100",
+            ],
+        )
+
+    def test_budget_set_requires_value(self) -> None:
+        with self.assertRaises(ValueError):
+            build_action_command(
+                "budget_set",
+                {"budget_system_daily": "", "budget_agent_daily": "", "budget_monthly": ""},
+                workspace=Path.cwd(),
+                python_bin=sys.executable,
+            )
+
     def test_doctor_command(self) -> None:
         cmd = build_action_command(
             "doctor",
@@ -198,6 +246,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(required_tool_for_action("llm_setup"), "shell")
         self.assertEqual(required_tool_for_action("bootstrap_setup"), "shell")
         self.assertEqual(required_tool_for_action("doctor"), "shell")
+        self.assertEqual(required_tool_for_action("budget_status"), "shell")
+        self.assertEqual(required_tool_for_action("budget_set"), "shell")
         self.assertEqual(required_tool_for_action("policy_apply"), "shell")
         self.assertEqual(required_tool_for_action("policy_automation"), "shell")
         self.assertIsNone(required_tool_for_action("unknown_action"))
