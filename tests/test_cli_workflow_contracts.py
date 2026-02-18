@@ -10,7 +10,14 @@ from unittest import mock
 
 import typer
 
-from borisbot.cli import _load_and_validate_workflow, lint_workflow, plan_preview, provider_status, release_check
+from borisbot.cli import (
+    _load_and_validate_workflow,
+    lint_workflow,
+    plan_preview,
+    provider_status,
+    provider_test,
+    release_check,
+)
 from borisbot.cli import _compute_lint_violations
 from borisbot.cli import _format_record_runtime_error
 
@@ -240,6 +247,15 @@ class CliWorkflowContractTests(unittest.TestCase):
             text = output.getvalue()
             self.assertIn("PROVIDER STATUS", text)
             self.assertIn("openai", text)
+
+    def test_provider_test_fail_exits_nonzero(self) -> None:
+        with mock.patch("borisbot.cli._probe_provider_connection", return_value=(False, "missing key")):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    provider_test(provider_name="openai", model_name="gpt-4o-mini")
+            self.assertEqual(cm.exception.exit_code, 1)
+            self.assertIn("PROVIDER TEST: FAIL", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -19,7 +19,12 @@ from borisbot.contracts import SUPPORTED_TASK_COMMAND_SCHEMAS, TASK_COMMAND_SCHE
 from borisbot.failures import build_failure
 from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
-from borisbot.guide.server import _build_dry_run_preview, _collect_runtime_status, run_guide_server
+from borisbot.guide.server import (
+    _build_dry_run_preview,
+    _collect_runtime_status,
+    _probe_provider_connection,
+    run_guide_server,
+)
 from borisbot.browser.actions import BrowserActions
 from borisbot.browser.command_router import CommandRouter
 from borisbot.browser.executor import BrowserExecutor
@@ -299,6 +304,24 @@ def provider_status(
         typer.echo(
             f"  - {name}: enabled={str(enabled).lower()} configured={str(configured).lower()} usable={str(usable).lower()}{suffix}"
         )
+
+
+@app.command("provider-test")
+def provider_test(
+    provider_name: str = typer.Option("ollama", "--provider"),
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+):
+    """Probe provider connectivity for the selected provider/model."""
+    ok, message = _probe_provider_connection(provider_name, model_name)
+    if ok:
+        typer.echo("PROVIDER TEST: OK")
+        typer.echo(f"  provider: {provider_name}")
+        typer.echo(f"  message: {message}")
+        return
+    typer.echo("PROVIDER TEST: FAIL")
+    typer.echo(f"  provider: {provider_name}")
+    typer.echo(f"  message: {message}")
+    raise typer.Exit(code=1)
 
 
 @app.command("cleanup-browsers")
