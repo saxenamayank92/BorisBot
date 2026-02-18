@@ -595,6 +595,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("onboarding-list", html)
         self.assertIn("Live Cost Estimator", html)
         self.assertIn("refreshCostEstimator()", html)
+        self.assertIn("trace-summary", html)
+        self.assertIn("renderTraceSummary(trace)", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(

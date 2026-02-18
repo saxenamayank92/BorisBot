@@ -2149,6 +2149,7 @@ def _render_html(workflows: list[str]) -> str:
           <button class="secondary" onclick="handoffSelectedAssistantTrace()">Handoff Trace To Planner</button>
           <button onclick="exportSelectedTrace()">Export Trace JSON</button>
         </div>
+        <pre id="trace-summary" style="margin-bottom:10px;min-height:90px;max-height:170px;">No trace selected.</pre>
         <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
         <a class="browser-link" id="browser-link" href="#" target="_blank" style="display:none;"></a>
         <div class="viewer-toolbar">
@@ -3026,10 +3027,33 @@ def _render_html(workflows: list[str]) -> str:
           return;
         }}
         const trace = await response.json();
+        renderTraceSummary(trace);
         document.getElementById('trace-output').textContent = JSON.stringify(trace, null, 2);
       }} catch (e) {{
+        document.getElementById('trace-summary').textContent = 'Failed to load trace summary.';
         document.getElementById('trace-output').textContent = 'Failed to load trace details.';
       }}
+    }}
+
+    function renderTraceSummary(trace) {{
+      if (!trace || typeof trace !== 'object') {{
+        document.getElementById('trace-summary').textContent = 'Trace summary unavailable.';
+        return;
+      }}
+      const stages = Array.isArray(trace.stages) ? trace.stages : [];
+      const lines = [
+        `Trace: ${{trace.trace_id || 'unknown'}}`,
+        `Type: ${{trace.type || 'unknown'}}`,
+        `Stages: ${{stages.length}}`,
+        '',
+      ];
+      for (const stage of stages) {{
+        if (!stage || typeof stage !== 'object') continue;
+        const event = stage.event || 'stage';
+        const at = stage.at || '';
+        lines.push(`- ${{event}}${{at ? ' @ ' + at : ''}}`);
+      }}
+      document.getElementById('trace-summary').textContent = lines.join('\\n');
     }}
 
     async function exportSelectedTrace() {{
