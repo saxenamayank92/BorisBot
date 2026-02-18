@@ -551,6 +551,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("sendAssistantPrompt()", html)
         self.assertIn("handoffLastAssistantTrace()", html)
         self.assertIn("handoffSelectedAssistantTrace()", html)
+        self.assertIn("trace-filter", html)
         self.assertIn("clearAssistantHistory()", html)
         self.assertIn("provider-cards", html)
 

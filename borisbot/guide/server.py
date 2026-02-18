@@ -2024,6 +2024,12 @@ def _render_html(workflows: list[str]) -> str:
         <div class="job-meta" id="meta">No command running.</div>
         <pre id="plan-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
         <div class="actions" style="margin-bottom:8px;">
+          <select id="trace-filter" style="min-width:150px;" onchange="refreshTraces()">
+            <option value="all">all traces</option>
+            <option value="assistant_chat">assistant_chat</option>
+            <option value="plan_preview">plan_preview</option>
+            <option value="action_run">action_run</option>
+          </select>
           <select id="trace-select" style="flex:1;min-width:240px;" onchange="loadSelectedTrace()"></select>
           <button class="secondary" onclick="loadSelectedTrace()">View Trace</button>
           <button class="secondary" onclick="handoffSelectedAssistantTrace()">Handoff Trace To Planner</button>
@@ -2739,11 +2745,15 @@ def _render_html(workflows: list[str]) -> str:
         const response = await fetch('/api/traces');
         if (!response.ok) return;
         const data = await response.json();
-        const items = Array.isArray(data.items) ? data.items : [];
+        const filter = document.getElementById('trace-filter').value || 'all';
+        const allItems = Array.isArray(data.items) ? data.items : [];
+        const items = filter === 'all'
+          ? allItems
+          : allItems.filter(item => (item && item.type) === filter);
         const select = document.getElementById('trace-select');
         if (!items.length) {{
-          select.innerHTML = '<option value="">No traces yet</option>';
-          document.getElementById('trace-output').textContent = 'No traces yet.';
+          select.innerHTML = '<option value="">No traces for selected filter</option>';
+          document.getElementById('trace-output').textContent = 'No traces for selected filter.';
           return;
         }}
         const previous = select.value;
