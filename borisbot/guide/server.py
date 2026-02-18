@@ -1234,6 +1234,7 @@ def _render_html(workflows: list[str]) -> str:
         <div class="step" style="margin-top:0;padding-top:0;border-top:0;">
           <h3>Runtime Status</h3>
           <p id="runtime-line">Loading...</p>
+          <div id="provider-cards" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;"></div>
         </div>
         <div class="job-meta" id="meta">No command running.</div>
         <pre id="plan-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
@@ -1758,6 +1759,19 @@ def _render_html(workflows: list[str]) -> str:
         const heal = data.self_heal_healed ? 'recovered' : (data.self_heal_probe_ok ? 'ok' : 'failed');
         const line = `Provider=${{data.provider_name}}:${{data.model_name}} | Health=${{data.provider_state}} | Budget=${{data.budget_status}} | Today=$${{Number(data.today_cost_usd || 0).toFixed(2)}}/${{Number(data.daily_limit_usd || 0).toFixed(2)}} | Queue=${{data.queue_depth}} | Heartbeat=${{data.heartbeat_age_seconds >= 0 ? data.heartbeat_age_seconds + 's' : 'unknown'}} | Heal=${{heal}}${{ollamaNote}}`;
         document.getElementById('runtime-line').textContent = line;
+        const matrix = data.provider_matrix || {{}};
+        const cards = Object.keys(matrix).sort().map(name => {{
+          const row = matrix[name] || {{}};
+          const usable = !!row.usable;
+          const reason = row.reason ? ` | reason=${{row.reason}}` : '';
+          const model = row.model_name ? ` | model=${{row.model_name}}` : '';
+          const bg = usable ? '#e7f6ef' : '#fff3ea';
+          return `<div title="enabled=${{!!row.enabled}}, configured=${{!!row.configured}}${{reason}}${{model}}" style="border:1px solid var(--border);border-radius:10px;padding:8px;background:${{bg}};">
+            <strong>${{name}}</strong><br/>
+            <span style="font-size:12px;color:var(--muted);">enabled=${{!!row.enabled}} | configured=${{!!row.configured}} | usable=${{usable}}</span>
+          </div>`;
+        }}).join('');
+        document.getElementById('provider-cards').innerHTML = cards || '';
       }} catch (e) {{
         // keep previous UI state on transient fetch failure
       }}
@@ -1885,6 +1899,7 @@ def _collect_runtime_status(python_bin: str) -> dict:
     self_heal_probe_ok = False
     self_heal_healed = False
     ollama_installed = shutil.which("ollama") is not None
+    provider_matrix: dict[str, dict[str, object]] = {}
 
     try:
         response = httpx.get("http://127.0.0.1:7777/metrics/providers", timeout=1.5)
@@ -1943,9 +1958,32 @@ def _collect_runtime_status(python_bin: str) -> dict:
         self_heal_probe_ok = bool(heartbeat.get("self_heal_probe_ok", False))
         self_heal_healed = bool(heartbeat.get("self_heal_healed", False))
 
+    provider_settings = profile.get("provider_settings", {})
+    secret_status = get_secret_status()
+    for provider in ["ollama", "openai", "anthropic", "google", "azure"]:
+        settings = provider_settings.get(provider, {}) if isinstance(provider_settings, dict) else {}
+        enabled = bool(settings.get("enabled", provider == "ollama")) if isinstance(settings, dict) else (provider == "ollama")
+        model = str(settings.get("model_name", "")).strip() if isinstance(settings, dict) else ""
+        if provider == "ollama":
+            configured = ollama_installed
+            usable = enabled and ollama_installed
+            reason = "" if usable else "ollama_not_installed"
+        else:
+            configured = bool(secret_status.get(provider, {}).get("configured", False))
+            usable = enabled and configured
+            reason = "" if usable else ("api_key_missing" if enabled else "disabled")
+        provider_matrix[provider] = {
+            "enabled": enabled,
+            "configured": configured,
+            "usable": usable,
+            "reason": reason,
+            "model_name": model,
+        }
+
     return {
         "provider_name": provider_name,
         "provider_state": provider_state,
+        "provider_matrix": provider_matrix,
         "model_name": model_name,
         "session_tokens": session_tokens,
         "session_cost_usd": session_cost,

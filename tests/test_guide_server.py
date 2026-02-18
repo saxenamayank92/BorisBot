@@ -7,6 +7,7 @@ from unittest import mock
 
 from borisbot.guide.server import (
     GuideState,
+    _collect_runtime_status,
     _resolve_ollama_install_command,
     _resolve_ollama_start_command,
     _build_dry_run_preview,
@@ -285,6 +286,15 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("Provider Onboarding", html)
         self.assertIn("refreshProviderSecrets()", html)
         self.assertIn("clearChatHistory()", html)
+
+    def test_collect_runtime_status_includes_provider_matrix(self) -> None:
+        with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(
+            "borisbot.guide.server.get_secret_status",
+            return_value={"openai": {"configured": False}},
+        ):
+            status = _collect_runtime_status(sys.executable)
+        self.assertIn("provider_matrix", status)
+        self.assertIn("ollama", status["provider_matrix"])
 
 
 if __name__ == "__main__":
