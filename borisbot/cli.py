@@ -46,9 +46,12 @@ from borisbot.supervisor.capability_manager import CapabilityManager
 from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
 from borisbot.supervisor.tool_permissions import (
+    ALLOWED_DECISIONS,
+    ALLOWED_TOOLS,
     DECISION_ALLOW,
     DECISION_PROMPT,
     TOOL_ASSISTANT,
+    get_agent_permission_matrix_sync,
     get_agent_tool_permission_sync,
     set_agent_tool_permission_sync,
 )
@@ -548,6 +551,61 @@ def chat_clear(
         return
     clear_chat_history(agent)
     typer.echo(f"CHAT CLEAR: OK ({agent}, assistant_only=false)")
+
+
+@app.command("permissions")
+def permissions(
+    agent_id: str = typer.Option("default", "--agent-id"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Print per-agent tool permission matrix."""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(json_output, bool):
+        json_output = False
+    agent = agent_id.strip() or "default"
+    matrix = get_agent_permission_matrix_sync(agent)
+    if json_output:
+        typer.echo(json.dumps({"agent_id": agent, "permissions": matrix}, indent=2))
+        return
+    typer.echo(f"PERMISSIONS ({agent})")
+    for tool_name in sorted(matrix.keys()):
+        typer.echo(f"  - {tool_name}: {matrix[tool_name]}")
+
+
+@app.command("set-permission")
+def set_permission(
+    tool_name: str = typer.Option(..., "--tool"),
+    decision: str = typer.Option(..., "--decision"),
+    agent_id: str = typer.Option("default", "--agent-id"),
+):
+    """Set per-agent tool permission decision."""
+    if not isinstance(tool_name, str):
+        tool_name = ""
+    if not isinstance(decision, str):
+        decision = ""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    tool = tool_name.strip().lower()
+    value = decision.strip().lower()
+    agent = agent_id.strip() or "default"
+
+    if tool not in ALLOWED_TOOLS:
+        typer.echo("SET PERMISSION: FAIL")
+        typer.echo(f"  error: unsupported tool '{tool}'")
+        typer.echo(f"  allowed_tools: {', '.join(sorted(ALLOWED_TOOLS))}")
+        raise typer.Exit(code=1)
+    if value not in ALLOWED_DECISIONS:
+        typer.echo("SET PERMISSION: FAIL")
+        typer.echo(f"  error: unsupported decision '{value}'")
+        typer.echo(f"  allowed_decisions: {', '.join(sorted(ALLOWED_DECISIONS))}")
+        raise typer.Exit(code=1)
+
+    set_agent_tool_permission_sync(agent, tool, value)
+    typer.echo("SET PERMISSION: OK")
+    typer.echo(f"  agent: {agent}")
+    typer.echo(f"  tool: {tool}")
+    typer.echo(f"  decision: {value}")
 
 
 @app.command("provider-status")

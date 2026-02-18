@@ -18,9 +18,11 @@ from borisbot.cli import (
     llm_setup,
     lint_workflow,
     plan_preview,
+    permissions,
     provider_status,
     provider_test,
     release_check,
+    set_permission,
 )
 from borisbot.cli import _compute_lint_violations
 from borisbot.cli import _format_record_runtime_error
@@ -354,6 +356,54 @@ class CliWorkflowContractTests(unittest.TestCase):
                 chat_clear(agent_id="default", assistant_only=True)
             clear_roles.assert_called_once()
             self.assertIn("assistant_only=true", output.getvalue())
+
+    def test_permissions_human_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli.get_agent_permission_matrix_sync",
+            return_value={"assistant": "allow", "browser": "prompt"},
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                permissions(agent_id="default", json_output=False)
+            text = output.getvalue()
+            self.assertIn("PERMISSIONS (default)", text)
+            self.assertIn("assistant: allow", text)
+
+    def test_permissions_json_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli.get_agent_permission_matrix_sync",
+            return_value={"assistant": "allow"},
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                permissions(agent_id="default", json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["agent_id"], "default")
+            self.assertEqual(payload["permissions"]["assistant"], "allow")
+
+    def test_set_permission_ok(self) -> None:
+        with mock.patch("borisbot.cli.set_agent_tool_permission_sync") as set_perm:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                set_permission(tool_name="assistant", decision="allow", agent_id="agent-1")
+            set_perm.assert_called_once_with("agent-1", "assistant", "allow")
+            self.assertIn("SET PERMISSION: OK", output.getvalue())
+
+    def test_set_permission_rejects_unknown_tool(self) -> None:
+        output = io.StringIO()
+        with self.assertRaises(typer.Exit) as cm:
+            with redirect_stdout(output):
+                set_permission(tool_name="unknown", decision="allow", agent_id="default")
+        self.assertEqual(cm.exception.exit_code, 1)
+        self.assertIn("unsupported tool", output.getvalue())
+
+    def test_set_permission_rejects_unknown_decision(self) -> None:
+        output = io.StringIO()
+        with self.assertRaises(typer.Exit) as cm:
+            with redirect_stdout(output):
+                set_permission(tool_name="assistant", decision="maybe", agent_id="default")
+        self.assertEqual(cm.exception.exit_code, 1)
+        self.assertIn("unsupported decision", output.getvalue())
 
     def test_llm_setup_fails_when_missing_without_auto_install(self) -> None:
         with mock.patch("borisbot.cli.shutil.which", return_value=None):
