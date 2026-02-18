@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import webbrowser
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
@@ -308,6 +309,7 @@ class GuideJob:
     job_id: str
     action: str
     command: list[str]
+    params: dict[str, str] = field(default_factory=dict)
     status: str = "running"
     output: list[str] = field(default_factory=list)
     returncode: int | None = None
@@ -326,6 +328,7 @@ class GuideJob:
         return {
             "job_id": self.job_id,
             "action": self.action,
+            "params": self.params,
             "command": " ".join(shlex.quote(part) for part in self.command),
             "status": self.status,
             "returncode": self.returncode,
@@ -355,6 +358,17 @@ class GuideState:
         return sorted(str(p.relative_to(self.workspace)) for p in workflow_dir.glob("*.json"))
 
     def create_job(self, action: str, params: dict[str, str]) -> GuideJob:
+        request_fingerprint = self._request_fingerprint(action, params)
+        with self._lock:
+            for existing in self._jobs.values():
+                if existing.status != "running":
+                    continue
+                if existing.action != action:
+                    continue
+                if self._request_fingerprint(existing.action, existing.params) == request_fingerprint:
+                    raise ValueError(
+                        "An identical job is already running. Wait for it to finish before retrying."
+                    )
         if action in {"record", "replay"}:
             running_browser_job = self._find_running_browser_job()
             if running_browser_job is not None:
@@ -365,7 +379,7 @@ class GuideState:
         with self._lock:
             self._counter += 1
             job_id = f"job_{self._counter:04d}"
-            job = GuideJob(job_id=job_id, action=action, command=command)
+            job = GuideJob(job_id=job_id, action=action, command=command, params=params)
             self._jobs[job_id] = job
             trace = self._create_trace_locked(
                 trace_type="action_run",
@@ -378,6 +392,10 @@ class GuideState:
             job.trace_id = trace["trace_id"]
         self._start_job(job)
         return job
+
+    def _request_fingerprint(self, action: str, params: dict[str, str]) -> str:
+        raw = json.dumps({"action": action, "params": params}, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def list_jobs(self) -> list[dict]:
         with self._lock:

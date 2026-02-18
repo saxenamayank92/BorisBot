@@ -165,6 +165,20 @@ class GuideServerCommandTests(unittest.TestCase):
                 {"workflow_path": "workflows/wf_demo.json"},
             )
 
+    def test_create_job_rejects_duplicate_running_action(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        with mock.patch.object(state, "_start_job", return_value=None):
+            first = state.create_job(
+                "verify",
+                {"agent_id": "default"},
+            )
+        first.status = "running"
+        with self.assertRaises(ValueError):
+            state.create_job(
+                "verify",
+                {"agent_id": "default"},
+            )
+
     def test_add_plan_trace_exposed_in_list(self) -> None:
         state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
         trace = state.add_plan_trace(
