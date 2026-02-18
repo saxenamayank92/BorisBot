@@ -468,6 +468,19 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertTrue(traces)
         self.assertEqual(traces[0]["trace_id"], trace["trace_id"])
 
+    def test_add_assistant_trace_exposed_in_list(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        trace = state.add_assistant_trace(
+            agent_id="default",
+            model_name="llama3.2:3b",
+            prompt="hello",
+            response={"status": "ok", "message": "hi"},
+        )
+        traces = state.list_traces()
+        self.assertTrue(traces)
+        self.assertEqual(traces[0]["trace_id"], trace["trace_id"])
+        self.assertEqual(traces[0]["type"], "assistant_chat")
+
     def test_get_trace_and_append_stage(self) -> None:
         state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
         trace = state.add_plan_trace(

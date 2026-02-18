@@ -47,6 +47,7 @@ from borisbot.supervisor.tool_permissions import (
     DECISION_ALLOW,
     DECISION_DENY,
     DECISION_PROMPT,
+    TOOL_ASSISTANT,
     TOOL_BROWSER,
     TOOL_FILESYSTEM,
     TOOL_SCHEDULER,
@@ -1150,6 +1151,19 @@ class GuideState:
                 },
             )
 
+    def add_assistant_trace(self, *, agent_id: str, model_name: str, prompt: str, response: dict) -> dict:
+        """Append assistant chat trace entry."""
+        with self._lock:
+            return self._create_trace_locked(
+                trace_type="assistant_chat",
+                data={
+                    "agent_id": agent_id,
+                    "model_name": model_name,
+                    "prompt": prompt,
+                    "response": response,
+                },
+            )
+
     def get_trace(self, trace_id: str) -> dict | None:
         """Fetch trace by id."""
         with self._lock:
@@ -1431,6 +1445,34 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 payload = self._read_json()
                 prompt = str(payload.get("prompt", "")).strip()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                decision = get_agent_tool_permission_sync(agent_id, TOOL_ASSISTANT)
+                approve_permission = bool(payload.get("approve_permission", False))
+                if decision == DECISION_DENY:
+                    self._json_response(
+                        {
+                            "error": "permission_denied",
+                            "agent_id": agent_id,
+                            "tool_name": TOOL_ASSISTANT,
+                            "message": f"Tool '{TOOL_ASSISTANT}' is denied for agent '{agent_id}'.",
+                        },
+                        status=HTTPStatus.FORBIDDEN,
+                    )
+                    return
+                if decision == DECISION_PROMPT and not approve_permission:
+                    self._json_response(
+                        {
+                            "error": "permission_required",
+                            "agent_id": agent_id,
+                            "tool_name": TOOL_ASSISTANT,
+                            "message": (
+                                f"Agent '{agent_id}' requires approval for tool '{TOOL_ASSISTANT}'."
+                            ),
+                        },
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                if decision == DECISION_PROMPT and approve_permission:
+                    set_agent_tool_permission_sync(agent_id, TOOL_ASSISTANT, DECISION_ALLOW)
                 provider_name = str(payload.get("provider_name", "ollama")).strip() or "ollama"
                 model_name = _resolve_model_for_provider(
                     provider_name,
@@ -1449,6 +1491,13 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 if response_payload.get("status") != "ok":
                     self._json_response(response_payload, status=HTTPStatus.BAD_REQUEST)
                     return
+                trace = state.add_assistant_trace(
+                    agent_id=agent_id,
+                    model_name=model_name,
+                    prompt=prompt,
+                    response=response_payload,
+                )
+                response_payload["trace_id"] = trace["trace_id"]
                 self._json_response(response_payload, status=HTTPStatus.OK)
                 return
             if self.path == "/api/chat-clear":
@@ -2384,7 +2433,7 @@ def _render_html(workflows: list[str]) -> str:
       refreshTraces();
     }}
 
-    async function sendAssistantPrompt() {{
+    async function sendAssistantPrompt(approvePermission=false) {{
       const input = document.getElementById('assistant-input');
       const prompt = (input.value || '').trim();
       if (!prompt) return;
@@ -2395,11 +2444,22 @@ def _render_html(workflows: list[str]) -> str:
           prompt,
           agent_id: document.getElementById('agent').value,
           model_name: document.getElementById('model').value,
-          provider_name: document.getElementById('primary_provider').value || 'ollama'
+          provider_name: document.getElementById('primary_provider').value || 'ollama',
+          approve_permission: approvePermission
         }})
       }});
       const data = await response.json();
       if (!response.ok) {{
+        if (data.error === 'permission_required') {{
+          const ok = window.confirm(`${{data.message}} Approve now?`);
+          if (ok) {{
+            const result = await sendAssistantPrompt(true);
+            refreshPermissions();
+            return result;
+          }}
+          document.getElementById('assistant-output').textContent = 'Permission not granted: ' + (data.tool_name || '');
+          return;
+        }}
         document.getElementById('assistant-output').textContent = 'Assistant failed: ' + (data.message || data.error || 'unknown error');
         return;
       }}

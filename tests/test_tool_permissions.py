@@ -8,6 +8,7 @@ from borisbot.supervisor.tool_permissions import (
     DECISION_ALLOW,
     DECISION_DENY,
     DECISION_PROMPT,
+    TOOL_ASSISTANT,
     TOOL_BROWSER,
     TOOL_FILESYSTEM,
     get_agent_permission_matrix_sync,
@@ -41,6 +42,7 @@ class ToolPermissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "permissions.db"
             before = get_agent_permission_matrix_sync("agent_a", db_path=db_path)
+            self.assertEqual(before[TOOL_ASSISTANT], DECISION_PROMPT)
             self.assertEqual(before[TOOL_BROWSER], DECISION_PROMPT)
             self.assertEqual(before[TOOL_FILESYSTEM], DECISION_PROMPT)
             set_agent_tool_permission_sync(
