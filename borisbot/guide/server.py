@@ -134,6 +134,7 @@ ACTION_TOOL_MAP = {
     "ollama_start": TOOL_SHELL,
     "ollama_pull": TOOL_SHELL,
     "llm_setup": TOOL_SHELL,
+    "bootstrap_setup": TOOL_SHELL,
     "verify": TOOL_SHELL,
     "analyze": TOOL_FILESYSTEM,
     "lint": TOOL_FILESYSTEM,
@@ -1085,6 +1086,18 @@ def build_action_command(
     if action == "llm_setup":
         model = params.get("model_name", "").strip() or "llama3.2:3b"
         return [python_bin, "-m", "borisbot.cli", "llm-setup", "--model", model, "--json"]
+    if action == "bootstrap_setup":
+        model = params.get("model_name", "").strip() or "llama3.2:3b"
+        return [
+            python_bin,
+            "-m",
+            "borisbot.cli",
+            "setup",
+            "--model",
+            model,
+            "--no-launch-guide",
+            "--json",
+        ]
     if action == "verify":
         return [python_bin, "-m", "borisbot.cli", "verify"]
     if action == "analyze":
@@ -2086,6 +2099,7 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('ollama_start')">Start Ollama</button>
             <button onclick="runAction('ollama_pull')">Pull Model</button>
             <button onclick="runOneTouchLlmSetup()">One-Touch LLM Setup</button>
+            <button onclick="runBootstrapSetup()">Run Bootstrap Setup</button>
             <button onclick="runAction('cleanup_sessions')">Reset Browser Sessions</button>
             <button onclick="runAction('verify')">Run Verify</button>
             <button onclick="runAction('session_status')">Session Status</button>
@@ -2331,6 +2345,30 @@ def _render_html(workflows: list[str]) -> str:
       }} catch (e) {{
         document.getElementById('meta').textContent = 'One-touch setup failed unexpectedly.';
       }}
+    }}
+
+    async function runBootstrapSetup() {{
+      document.getElementById('meta').textContent = 'Starting bootstrap setup...';
+      try {{
+        const setupJob = await runActionAndWait('bootstrap_setup');
+        let payload = null;
+        try {{
+          payload = JSON.parse(setupJob.output || '{{}}');
+        }} catch (e) {{
+          payload = null;
+        }}
+        if (!payload) {{
+          document.getElementById('meta').textContent = 'Bootstrap setup failed. Invalid setup payload.';
+          return;
+        }}
+        document.getElementById('output').textContent = JSON.stringify(payload, null, 2);
+        const status = String(payload.status || 'unknown').toUpperCase();
+        document.getElementById('meta').textContent = `Bootstrap setup: ${{status}}`;
+      }} catch (e) {{
+        document.getElementById('meta').textContent = 'Bootstrap setup failed. Check terminal output.';
+      }}
+      refreshRuntimeStatus();
+      refreshPermissions();
     }}
 
     async function showOllamaSetupPlan() {{
