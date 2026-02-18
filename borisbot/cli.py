@@ -1106,6 +1106,59 @@ async def _build_session_status(agent_id: str, model_name: str) -> dict:
     }
 
 
+async def _build_budget_status_snapshot(agent_id: str) -> dict:
+    """Assemble deterministic budget + spend snapshot for CLI rendering."""
+    guard = CostGuard()
+    combined = await guard.get_budget_status(agent_id)
+    global_spend = await guard.get_spend_snapshot()
+    per_agent = await guard.get_agent_spend_today()
+    return {
+        "agent_id": agent_id,
+        "status": str(combined.get("status", "ok")).upper(),
+        "global_status": str(combined.get("global_status", "ok")).upper(),
+        "agent_status": str(combined.get("agent_status", "ok")).upper(),
+        "daily_spend_usd": float(combined.get("daily_spend", 0.0)),
+        "daily_limit_usd": float(combined.get("daily_limit", 0.0)),
+        "daily_remaining_usd": float(combined.get("daily_remaining", 0.0)),
+        "agent_daily_spend_usd": float(combined.get("agent_daily_spend", 0.0)),
+        "agent_daily_limit_usd": float(combined.get("agent_daily_limit", 0.0)),
+        "monthly_spend_usd": float(global_spend.get("monthly_spend", 0.0)),
+        "monthly_limit_usd": float(global_spend.get("monthly_limit", 0.0)),
+        "agent_spend_today": per_agent,
+    }
+
+
+async def _set_budget_limits(
+    *,
+    system_daily_limit_usd: float | None,
+    agent_daily_limit_usd: float | None,
+    monthly_limit_usd: float | None,
+) -> dict[str, float]:
+    """Persist one or more budget limits and return applied values."""
+    updates: dict[str, float] = {}
+    if system_daily_limit_usd is not None:
+        updates["system_daily_limit_usd"] = round(float(system_daily_limit_usd), 6)
+    if agent_daily_limit_usd is not None:
+        updates["agent_daily_limit_usd"] = round(float(agent_daily_limit_usd), 6)
+    if monthly_limit_usd is not None:
+        updates["monthly_budget_usd"] = round(float(monthly_limit_usd), 6)
+    if not updates:
+        return {}
+
+    async for db in get_db():
+        for key, value in updates.items():
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, str(value)),
+            )
+        await db.commit()
+        break
+    return updates
+
+
 @app.command("session-status")
 def session_status(
     agent_id: str = typer.Option("default", "--agent-id", help="Agent id for budget status"),
@@ -1154,6 +1207,73 @@ def session_status(
         typer.echo("Self-heal: probe OK")
     else:
         typer.echo("Self-heal: probe failed or unavailable")
+
+
+@app.command("budget-status")
+def budget_status(
+    agent_id: str = typer.Option("default", "--agent-id", help="Agent id for per-agent budget status"),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON payload"),
+):
+    """Print deterministic spend + budget snapshot including per-agent view."""
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(json_output, bool):
+        json_output = False
+    snapshot = asyncio.run(_build_budget_status_snapshot(agent_id.strip() or "default"))
+    if json_output:
+        typer.echo(json.dumps(snapshot, indent=2))
+        return
+    typer.echo("BUDGET STATUS")
+    typer.echo(f"  agent_id: {snapshot['agent_id']}")
+    typer.echo(f"  status: {snapshot['status']} (global={snapshot['global_status']} agent={snapshot['agent_status']})")
+    typer.echo(f"  daily: ${snapshot['daily_spend_usd']:.2f} / ${snapshot['daily_limit_usd']:.2f}")
+    typer.echo(f"  daily_remaining: ${snapshot['daily_remaining_usd']:.2f}")
+    typer.echo(
+        f"  agent_daily: ${snapshot['agent_daily_spend_usd']:.2f} / ${snapshot['agent_daily_limit_usd']:.2f}"
+    )
+    typer.echo(f"  monthly: ${snapshot['monthly_spend_usd']:.2f} / ${snapshot['monthly_limit_usd']:.2f}")
+
+
+@app.command("budget-set")
+def budget_set(
+    system_daily_limit_usd: Optional[float] = typer.Option(None, "--system-daily-limit-usd"),
+    agent_daily_limit_usd: Optional[float] = typer.Option(None, "--agent-daily-limit-usd"),
+    monthly_limit_usd: Optional[float] = typer.Option(None, "--monthly-limit-usd"),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON payload"),
+):
+    """Update runtime budget limits in system settings."""
+    if not isinstance(system_daily_limit_usd, (int, float)):
+        system_daily_limit_usd = None
+    if not isinstance(agent_daily_limit_usd, (int, float)):
+        agent_daily_limit_usd = None
+    if not isinstance(monthly_limit_usd, (int, float)):
+        monthly_limit_usd = None
+    if not isinstance(json_output, bool):
+        json_output = False
+    provided = [value for value in (system_daily_limit_usd, agent_daily_limit_usd, monthly_limit_usd) if value is not None]
+    if not provided:
+        typer.echo("BUDGET SET: FAIL")
+        typer.echo("  error: provide at least one limit flag")
+        raise typer.Exit(code=1)
+    for value in provided:
+        if float(value) <= 0:
+            typer.echo("BUDGET SET: FAIL")
+            typer.echo("  error: limits must be > 0")
+            raise typer.Exit(code=1)
+    applied = asyncio.run(
+        _set_budget_limits(
+            system_daily_limit_usd=system_daily_limit_usd,
+            agent_daily_limit_usd=agent_daily_limit_usd,
+            monthly_limit_usd=monthly_limit_usd,
+        )
+    )
+    payload = {"status": "ok", "applied": applied}
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo("BUDGET SET: OK")
+    for key in sorted(applied.keys()):
+        typer.echo(f"  {key}: {applied[key]:.2f}")
 
 
 def _fetch_guide_json(host: str, port: int, path: str) -> dict:

@@ -14,6 +14,8 @@ from borisbot.cli import (
     _build_doctor_report,
     _load_and_validate_workflow,
     assistant_chat,
+    budget_set,
+    budget_status,
     chat_clear,
     chat_history,
     llm_setup,
@@ -295,6 +297,51 @@ class CliWorkflowContractTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["provider_name"], "ollama")
             self.assertEqual(payload["budget_status"], "OK")
+
+    def test_budget_status_json_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_budget_status_snapshot",
+            return_value={
+                "agent_id": "default",
+                "status": "OK",
+                "global_status": "OK",
+                "agent_status": "OK",
+                "daily_spend_usd": 0.0,
+                "daily_limit_usd": 20.0,
+                "daily_remaining_usd": 20.0,
+                "agent_daily_spend_usd": 0.0,
+                "agent_daily_limit_usd": 20.0,
+                "monthly_spend_usd": 0.0,
+                "monthly_limit_usd": 300.0,
+                "agent_spend_today": {},
+            },
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                budget_status(json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "OK")
+            self.assertEqual(payload["daily_limit_usd"], 20.0)
+
+    def test_budget_set_requires_one_limit(self) -> None:
+        output = io.StringIO()
+        with self.assertRaises(typer.Exit) as cm:
+            with redirect_stdout(output):
+                budget_set()
+        self.assertEqual(cm.exception.exit_code, 1)
+        self.assertIn("provide at least one limit flag", output.getvalue())
+
+    def test_budget_set_json_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli._set_budget_limits",
+            return_value={"system_daily_limit_usd": 5.0, "monthly_budget_usd": 50.0},
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                budget_set(system_daily_limit_usd=5.0, monthly_limit_usd=50.0, json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["applied"]["system_daily_limit_usd"], 5.0)
 
     def test_provider_test_fail_exits_nonzero(self) -> None:
         with mock.patch("borisbot.cli._probe_provider_connection", return_value=(False, "missing key")):
