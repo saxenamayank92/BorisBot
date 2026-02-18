@@ -39,7 +39,7 @@ borisbot golden-check
 borisbot plan-preview "Open example.com and read page title" --provider ollama
 
 # Run CLI non-execution assistant chat
-borisbot assistant-chat "Summarize deterministic browser automation tradeoffs" --provider ollama
+borisbot assistant-chat "Summarize deterministic browser automation tradeoffs" --provider ollama --approve-permission
 
 # Show provider readiness matrix in CLI
 borisbot provider-status

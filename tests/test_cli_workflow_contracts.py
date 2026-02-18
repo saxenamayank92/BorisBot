@@ -260,7 +260,7 @@ class CliWorkflowContractTests(unittest.TestCase):
             self.assertIn("PROVIDER TEST: FAIL", output.getvalue())
 
     def test_assistant_chat_human_ok(self) -> None:
-        with mock.patch(
+        with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="allow"), mock.patch(
             "borisbot.cli._build_assistant_response",
             return_value={
                 "status": "ok",
@@ -279,7 +279,7 @@ class CliWorkflowContractTests(unittest.TestCase):
             self.assertIn("hello", text)
 
     def test_assistant_chat_json_fail_exits_nonzero(self) -> None:
-        with mock.patch(
+        with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="allow"), mock.patch(
             "borisbot.cli._build_assistant_response",
             return_value={"status": "failed", "error_code": "LLM_PROVIDER_UNHEALTHY"},
         ):
@@ -288,6 +288,34 @@ class CliWorkflowContractTests(unittest.TestCase):
                 with redirect_stdout(output):
                     assistant_chat("say hi", json_output=True)
             self.assertEqual(cm.exception.exit_code, 1)
+
+    def test_assistant_chat_requires_permission_without_approve_flag(self) -> None:
+        with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="prompt"):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    assistant_chat("say hi", json_output=False)
+            self.assertEqual(cm.exception.exit_code, 1)
+            self.assertIn("ASSISTANT_PERMISSION_REQUIRED", output.getvalue())
+
+    def test_assistant_chat_approve_permission_sets_allow(self) -> None:
+        with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="prompt"), mock.patch(
+            "borisbot.cli.set_agent_tool_permission_sync"
+        ) as set_perm, mock.patch(
+            "borisbot.cli._build_assistant_response",
+            return_value={
+                "status": "ok",
+                "provider_name": "ollama",
+                "message": "hello",
+                "token_estimate": {"total_tokens": 1},
+                "cost_estimate_usd": 0.0,
+            },
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assistant_chat("say hi", approve_permission=True, json_output=False)
+            set_perm.assert_called_once()
+            self.assertIn("ASSISTANT CHAT: OK", output.getvalue())
 
     def test_llm_setup_fails_when_missing_without_auto_install(self) -> None:
         with mock.patch("borisbot.cli.shutil.which", return_value=None):
@@ -311,6 +339,18 @@ class CliWorkflowContractTests(unittest.TestCase):
                 llm_setup(model_name="llama3.2:3b", auto_install=True)
             text = output.getvalue()
             self.assertIn("LLM SETUP: OK", text)
+
+    def test_llm_setup_install_command_unavailable(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value=None), mock.patch(
+            "borisbot.cli._resolve_ollama_install_command",
+            side_effect=ValueError("unsupported platform"),
+        ):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    llm_setup(model_name="llama3.2:3b", auto_install=True)
+            self.assertEqual(cm.exception.exit_code, 1)
+            self.assertIn("unsupported platform", output.getvalue())
 
 
 if __name__ == "__main__":

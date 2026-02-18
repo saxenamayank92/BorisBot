@@ -39,6 +39,13 @@ from borisbot.supervisor.browser_manager import BrowserManager
 from borisbot.supervisor.capability_manager import CapabilityManager
 from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
+from borisbot.supervisor.tool_permissions import (
+    DECISION_ALLOW,
+    DECISION_PROMPT,
+    TOOL_ASSISTANT,
+    get_agent_tool_permission_sync,
+    set_agent_tool_permission_sync,
+)
 from borisbot.supervisor.worker import Worker
 
 app = typer.Typer()
@@ -306,7 +313,13 @@ def llm_setup(
         raise typer.Exit(code=1)
 
     if not ollama_installed:
-        install_cmd = _resolve_ollama_install_command(sys.platform)
+        try:
+            install_cmd = _resolve_ollama_install_command(sys.platform)
+        except ValueError as exc:
+            typer.echo("LLM SETUP: FAIL")
+            typer.echo("  step: install")
+            typer.echo(f"  error: {exc}")
+            raise typer.Exit(code=1)
         rc, output = _run_setup_command(install_cmd)
         if rc != 0:
             typer.echo("LLM SETUP: FAIL")
@@ -345,9 +358,44 @@ def assistant_chat(
     agent_id: str = typer.Option("default", "--agent-id"),
     model_name: str = typer.Option("llama3.2:3b", "--model"),
     provider_name: str = typer.Option("ollama", "--provider"),
+    approve_permission: bool = typer.Option(
+        False,
+        "--approve-permission",
+        help="Approve assistant tool permission when agent policy is prompt",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print full JSON assistant payload"),
 ):
     """Run general LLM assistant chat using provider fallback and budget checks."""
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
+    if not isinstance(agent_id, str):
+        agent_id = "default"
+    if not isinstance(model_name, str):
+        model_name = "llama3.2:3b"
+    if not isinstance(provider_name, str):
+        provider_name = "ollama"
+    if not isinstance(approve_permission, bool):
+        approve_permission = False
+    if not isinstance(json_output, bool):
+        json_output = False
+
+    agent_id = agent_id.strip() or "default"
+    model_name = model_name.strip() or "llama3.2:3b"
+    provider_name = provider_name.strip() or "ollama"
+
+    decision = get_agent_tool_permission_sync(agent_id, TOOL_ASSISTANT)
+    if decision != DECISION_ALLOW:
+        if decision == DECISION_PROMPT and approve_permission:
+            set_agent_tool_permission_sync(agent_id, TOOL_ASSISTANT, DECISION_ALLOW)
+        else:
+            typer.echo("ASSISTANT CHAT: FAIL")
+            if decision == DECISION_PROMPT:
+                typer.echo("  error: ASSISTANT_PERMISSION_REQUIRED")
+                typer.echo("  hint: rerun with --approve-permission")
+            else:
+                typer.echo("  error: ASSISTANT_PERMISSION_DENIED")
+            raise typer.Exit(code=1)
+
     payload = _build_assistant_response(
         prompt,
         agent_id=agent_id,
