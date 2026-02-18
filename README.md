@@ -35,6 +35,9 @@ borisbot golden-check
 # Run CLI planner dry-run preview
 borisbot plan-preview "Open example.com and read page title" --provider ollama
 
+# Run CLI non-execution assistant chat
+borisbot assistant-chat "Summarize deterministic browser automation tradeoffs" --provider ollama
+
 # Show provider readiness matrix in CLI
 borisbot provider-status
 
@@ -54,7 +57,7 @@ Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step
 - Persistent runtime profile: save `agent_name`, `primary_provider`, `provider_chain` (max 5), `model_name`, and per-provider settings.
 - API provider onboarding: configure `openai`, `anthropic`, `google`, and `azure` keys in GUI; keys are stored locally in `~/.borisbot/provider_secrets.json` and shown masked in UI.
 - Planner provider transport support: `ollama`, `openai`, `anthropic`, `google`, and `azure` are implemented for dry-run generation (Azure additionally requires `BORISBOT_AZURE_OPENAI_ENDPOINT`).
-- Permission matrix: set per-agent `prompt|allow|deny` for `browser`, `filesystem`, `shell`, `web_fetch`, and `scheduler`.
+- Permission matrix: set per-agent `prompt|allow|deny` for `assistant`, `browser`, `filesystem`, `shell`, `web_fetch`, and `scheduler`.
 - Planner dry-run and chat: send natural-language prompts, get validated `planner.v1` preview, token estimate, provider-aware cost estimate, required permissions, and persistent per-agent chat history.
 - Budget safety: dry-run planner is blocked when budget state is `blocked`.
 - Runtime provider panel: GUI shows per-provider enabled/configured/usable state with quick diagnostics.

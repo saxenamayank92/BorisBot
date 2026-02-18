@@ -20,6 +20,7 @@ from borisbot.failures import build_failure
 from borisbot.recorder.analyzer import analyze_workflow_file
 from borisbot.recorder.runner import run_record
 from borisbot.guide.server import (
+    _build_assistant_response,
     _build_dry_run_preview,
     _collect_runtime_status,
     _probe_provider_connection,
@@ -274,6 +275,52 @@ def plan_preview(
     typer.echo(f"  commands: {command_count}")
     typer.echo(f"  tokens_est: {total_tokens}")
     typer.echo(f"  cost_est_usd: ${cost:.4f}")
+
+
+@app.command("assistant-chat")
+def assistant_chat(
+    prompt: str,
+    agent_id: str = typer.Option("default", "--agent-id"),
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+    provider_name: str = typer.Option("ollama", "--provider"),
+    json_output: bool = typer.Option(False, "--json", help="Print full JSON assistant payload"),
+):
+    """Run general LLM assistant chat using provider fallback and budget checks."""
+    payload = _build_assistant_response(
+        prompt,
+        agent_id=agent_id,
+        model_name=model_name,
+        provider_name=provider_name,
+    )
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        if payload.get("status") != "ok":
+            raise typer.Exit(code=1)
+        return
+
+    if payload.get("status") != "ok":
+        typer.echo("ASSISTANT CHAT: FAIL")
+        typer.echo(f"  error: {payload.get('error_code', 'UNKNOWN')}")
+        attempts = payload.get("provider_attempts", [])
+        if isinstance(attempts, list) and attempts:
+            first = attempts[0]
+            if isinstance(first, dict):
+                typer.echo(
+                    f"  provider_attempt: {first.get('provider', 'unknown')} ({first.get('status', 'unknown')})"
+                )
+        raise typer.Exit(code=1)
+
+    token_est = payload.get("token_estimate", {})
+    total_tokens = int(token_est.get("total_tokens", 0)) if isinstance(token_est, dict) else 0
+    cost = float(payload.get("cost_estimate_usd", 0.0))
+    provider_selected = str(payload.get("provider_name", "unknown"))
+    message = str(payload.get("message", "")).strip()
+    typer.echo("ASSISTANT CHAT: OK")
+    typer.echo(f"  provider: {provider_selected}")
+    typer.echo(f"  tokens_est: {total_tokens}")
+    typer.echo(f"  cost_est_usd: ${cost:.4f}")
+    typer.echo("")
+    typer.echo(message)
 
 
 @app.command("provider-status")

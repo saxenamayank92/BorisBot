@@ -12,6 +12,7 @@ import typer
 
 from borisbot.cli import (
     _load_and_validate_workflow,
+    assistant_chat,
     lint_workflow,
     plan_preview,
     provider_status,
@@ -256,6 +257,36 @@ class CliWorkflowContractTests(unittest.TestCase):
                     provider_test(provider_name="openai", model_name="gpt-4o-mini")
             self.assertEqual(cm.exception.exit_code, 1)
             self.assertIn("PROVIDER TEST: FAIL", output.getvalue())
+
+    def test_assistant_chat_human_ok(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_assistant_response",
+            return_value={
+                "status": "ok",
+                "provider_name": "ollama",
+                "message": "hello",
+                "token_estimate": {"total_tokens": 12},
+                "cost_estimate_usd": 0.0,
+            },
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assistant_chat("say hi", json_output=False)
+            text = output.getvalue()
+            self.assertIn("ASSISTANT CHAT: OK", text)
+            self.assertIn("provider: ollama", text)
+            self.assertIn("hello", text)
+
+    def test_assistant_chat_json_fail_exits_nonzero(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_assistant_response",
+            return_value={"status": "failed", "error_code": "LLM_PROVIDER_UNHEALTHY"},
+        ):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    assistant_chat("say hi", json_output=True)
+            self.assertEqual(cm.exception.exit_code, 1)
 
 
 if __name__ == "__main__":
