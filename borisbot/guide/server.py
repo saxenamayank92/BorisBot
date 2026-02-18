@@ -548,6 +548,201 @@ def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model
     raise ValueError(f"Provider '{provider}' planner transport is not enabled in this build")
 
 
+def _generate_chat_raw_with_ollama(prompt: str, model_name: str) -> str:
+    """Call Ollama generate endpoint for freeform assistant chat."""
+    if shutil.which("ollama") is None:
+        raise ValueError("Ollama is not installed. Install it from Step 1 first.")
+    response = httpx.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": model_name,
+            "prompt": prompt.strip(),
+            "stream": False,
+            "options": {"temperature": 0.2},
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Ollama chat failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Ollama response payload invalid")
+    output = payload.get("response")
+    if not isinstance(output, str):
+        raise ValueError("Ollama response missing text output")
+    return output
+
+
+def _generate_chat_raw_with_openai(prompt: str, model_name: str) -> str:
+    """Call OpenAI chat completions for freeform assistant chat."""
+    api_key = get_provider_secret("openai")
+    if not api_key:
+        raise ValueError("OpenAI API key missing. Configure it in Provider Onboarding.")
+    endpoint = os.getenv("BORISBOT_OPENAI_API_BASE", "https://api.openai.com").rstrip("/")
+    response = httpx.post(
+        f"{endpoint}/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt.strip()}],
+            "temperature": 0.2,
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"OpenAI chat failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("OpenAI response payload invalid")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("OpenAI response missing choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("OpenAI response choice invalid")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("OpenAI response message invalid")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise ValueError("OpenAI response content invalid")
+    return content
+
+
+def _generate_chat_raw_with_anthropic(prompt: str, model_name: str) -> str:
+    """Call Anthropic messages endpoint for freeform assistant chat."""
+    api_key = get_provider_secret("anthropic")
+    if not api_key:
+        raise ValueError("Anthropic API key missing. Configure it in Provider Onboarding.")
+    endpoint = os.getenv("BORISBOT_ANTHROPIC_API_BASE", "https://api.anthropic.com").rstrip("/")
+    response = httpx.post(
+        f"{endpoint}/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model_name,
+            "max_tokens": 1200,
+            "temperature": 0.2,
+            "messages": [{"role": "user", "content": prompt.strip()}],
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Anthropic chat failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Anthropic response payload invalid")
+    content = payload.get("content")
+    if not isinstance(content, list) or not content:
+        raise ValueError("Anthropic response content invalid")
+    first = content[0]
+    if not isinstance(first, dict):
+        raise ValueError("Anthropic response content item invalid")
+    text = first.get("text")
+    if not isinstance(text, str):
+        raise ValueError("Anthropic response text missing")
+    return text
+
+
+def _generate_chat_raw_with_google(prompt: str, model_name: str) -> str:
+    """Call Google Gemini generateContent endpoint for freeform assistant chat."""
+    api_key = get_provider_secret("google")
+    if not api_key:
+        raise ValueError("Google API key missing. Configure it in Provider Onboarding.")
+    endpoint = os.getenv("BORISBOT_GOOGLE_API_BASE", "https://generativelanguage.googleapis.com").rstrip("/")
+    response = httpx.post(
+        f"{endpoint}/v1beta/models/{model_name}:generateContent",
+        params={"key": api_key},
+        json={
+            "contents": [{"role": "user", "parts": [{"text": prompt.strip()}]}],
+            "generationConfig": {"temperature": 0.2},
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Google chat failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Google response payload invalid")
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("Google response missing candidates")
+    first = candidates[0]
+    if not isinstance(first, dict):
+        raise ValueError("Google candidate invalid")
+    content = first.get("content")
+    if not isinstance(content, dict):
+        raise ValueError("Google content invalid")
+    parts = content.get("parts")
+    if not isinstance(parts, list) or not parts:
+        raise ValueError("Google content parts missing")
+    part0 = parts[0]
+    if not isinstance(part0, dict):
+        raise ValueError("Google content part invalid")
+    text = part0.get("text")
+    if not isinstance(text, str):
+        raise ValueError("Google response text missing")
+    return text
+
+
+def _generate_chat_raw_with_azure(prompt: str, model_name: str) -> str:
+    """Call Azure OpenAI chat completions for freeform assistant chat."""
+    api_key = get_provider_secret("azure")
+    if not api_key:
+        raise ValueError("Azure API key missing. Configure it in Provider Onboarding.")
+    endpoint = os.getenv("BORISBOT_AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
+    if not endpoint:
+        raise ValueError("Azure endpoint missing. Set BORISBOT_AZURE_OPENAI_ENDPOINT.")
+    api_version = os.getenv("BORISBOT_AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
+    response = httpx.post(
+        f"{endpoint}/openai/deployments/{model_name}/chat/completions",
+        params={"api-version": api_version},
+        headers={"api-key": api_key, "content-type": "application/json"},
+        json={
+            "messages": [{"role": "user", "content": prompt.strip()}],
+            "temperature": 0.2,
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Azure chat failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Azure response payload invalid")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Azure response missing choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("Azure response choice invalid")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("Azure response message invalid")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise ValueError("Azure response content invalid")
+    return content
+
+
+def _generate_chat_raw_with_provider(provider_name: str, prompt: str, model_name: str) -> str:
+    """Route assistant chat generation through configured provider transport."""
+    provider = str(provider_name).strip().lower()
+    if provider == "ollama":
+        return _generate_chat_raw_with_ollama(prompt, model_name=model_name)
+    if provider == "openai":
+        return _generate_chat_raw_with_openai(prompt, model_name=model_name)
+    if provider == "anthropic":
+        return _generate_chat_raw_with_anthropic(prompt, model_name=model_name)
+    if provider == "google":
+        return _generate_chat_raw_with_google(prompt, model_name=model_name)
+    if provider == "azure":
+        return _generate_chat_raw_with_azure(prompt, model_name=model_name)
+    raise ValueError(f"Provider '{provider}' chat transport is not enabled in this build")
+
+
 def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider_name: str) -> dict:
     """Build dry-run planner preview with strict schema + permission requirements."""
     if not isinstance(intent, str) or not intent.strip():
@@ -641,6 +836,70 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider
         "provider_attempts": attempts,
         "provider_chain": provider_chain,
         "raw_output": raw_output,
+        "budget": budget_status,
+    }
+
+
+def _build_assistant_response(prompt: str, agent_id: str, model_name: str, provider_name: str) -> dict:
+    """Build freeform assistant response with provider fallback and budget checks."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Assistant prompt cannot be empty.")
+    budget_status = _load_budget_snapshot(agent_id)
+    if bool(budget_status.get("blocked", False)):
+        return {
+            "status": "failed",
+            "error_class": "cost_guard",
+            "error_code": "BUDGET_BLOCKED",
+            "message": "Assistant calls are blocked by budget limits.",
+            "budget": budget_status,
+        }
+
+    provider_chain = _resolve_provider_chain(provider_name)
+    attempts: list[dict[str, str]] = []
+    selected_provider = ""
+    output_text = ""
+    for provider in provider_chain:
+        usable, reason = _provider_is_usable(provider)
+        if not usable:
+            attempts.append({"provider": provider, "status": "skipped", "reason": reason})
+            continue
+        try:
+            output_text = _generate_chat_raw_with_provider(provider, prompt, model_name=model_name).strip()
+            selected_provider = provider
+            attempts.append({"provider": provider, "status": "ok"})
+            break
+        except ValueError as exc:
+            attempts.append({"provider": provider, "status": "failed", "reason": str(exc)})
+            continue
+    if not output_text:
+        return {
+            "status": "failed",
+            "error_class": "llm_provider",
+            "error_code": "LLM_PROVIDER_UNHEALTHY",
+            "message": "No usable provider available for assistant chat.",
+            "provider_attempts": attempts,
+            "provider_chain": provider_chain,
+            "budget": budget_status,
+        }
+    prompt_tokens = _estimate_tokens(prompt)
+    completion_tokens = _estimate_tokens(output_text)
+    estimated_cost = _estimate_preview_cost_usd(
+        selected_provider,
+        input_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+    )
+    return {
+        "status": "ok",
+        "provider_name": selected_provider,
+        "message": output_text,
+        "provider_attempts": attempts,
+        "provider_chain": provider_chain,
+        "token_estimate": {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+        "cost_estimate_usd": estimated_cost,
         "budget": budget_status,
     }
 
@@ -1168,6 +1427,30 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     return
                 self._json_response({"agent_id": agent_id, "items": items}, status=HTTPStatus.OK)
                 return
+            if self.path == "/api/assistant-chat":
+                payload = self._read_json()
+                prompt = str(payload.get("prompt", "")).strip()
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                provider_name = str(payload.get("provider_name", "ollama")).strip() or "ollama"
+                model_name = _resolve_model_for_provider(
+                    provider_name,
+                    str(payload.get("model_name", "")).strip(),
+                )
+                try:
+                    response_payload = _build_assistant_response(
+                        prompt,
+                        agent_id=agent_id,
+                        model_name=model_name,
+                        provider_name=provider_name,
+                    )
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                if response_payload.get("status") != "ok":
+                    self._json_response(response_payload, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(response_payload, status=HTTPStatus.OK)
+                return
             if self.path == "/api/chat-clear":
                 payload = self._read_json()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
@@ -1617,6 +1900,16 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="clearChatHistory()">Clear Chat</button>
           </div>
           <pre id="chat-history" style="margin-top:8px;min-height:120px;max-height:220px;"></pre>
+        </div>
+
+        <div class="step">
+          <h3>Assistant Chat</h3>
+          <p>General LLM chat for non-execution tasks (research, drafting, reasoning).</p>
+          <textarea id="assistant-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Summarize tradeoffs of deterministic browser automation vs visual agents."></textarea>
+          <div class="actions">
+            <button class="secondary" onclick="sendAssistantPrompt()">Ask Assistant</button>
+          </div>
+          <pre id="assistant-output" style="margin-top:8px;min-height:120px;max-height:220px;">No assistant responses yet.</pre>
         </div>
       </section>
 
@@ -2089,6 +2382,28 @@ def _render_html(workflows: list[str]) -> str:
       renderChatHistory();
       input.value = '';
       refreshTraces();
+    }}
+
+    async function sendAssistantPrompt() {{
+      const input = document.getElementById('assistant-input');
+      const prompt = (input.value || '').trim();
+      if (!prompt) return;
+      const response = await fetch('/api/assistant-chat', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          prompt,
+          agent_id: document.getElementById('agent').value,
+          model_name: document.getElementById('model').value,
+          provider_name: document.getElementById('primary_provider').value || 'ollama'
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('assistant-output').textContent = 'Assistant failed: ' + (data.message || data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('assistant-output').textContent = JSON.stringify(data, null, 2);
     }}
 
     async function executeApprovedPlan(approvePermission=false, forceExecute=false) {{

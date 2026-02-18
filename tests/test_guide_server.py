@@ -12,6 +12,7 @@ from borisbot.guide.server import (
     _resolve_ollama_install_command,
     _resolve_ollama_start_command,
     _resolve_model_for_provider,
+    _build_assistant_response,
     _build_dry_run_preview,
     _estimate_preview_cost_usd,
     _generate_plan_raw_with_provider,
@@ -208,6 +209,39 @@ class GuideServerCommandTests(unittest.TestCase):
             )
         self.assertEqual(preview["status"], "failed")
         self.assertEqual(preview["error_code"], "LLM_PROVIDER_UNHEALTHY")
+
+    def test_build_assistant_response_budget_blocked(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": True}):
+            payload = _build_assistant_response(
+                "hello",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="ollama",
+            )
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["error_code"], "BUDGET_BLOCKED")
+
+    def test_build_assistant_response_falls_back_to_ollama(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": False}), mock.patch(
+            "borisbot.guide.server._resolve_provider_chain",
+            return_value=["openai", "ollama"],
+        ), mock.patch(
+            "borisbot.guide.server._provider_is_usable",
+            side_effect=[(True, ""), (True, "")],
+        ), mock.patch(
+            "borisbot.guide.server._generate_chat_raw_with_provider",
+            side_effect=[ValueError("openai failed"), "hello from local"],
+        ):
+            payload = _build_assistant_response(
+                "say hi",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="openai",
+            )
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["provider_name"], "ollama")
+        self.assertEqual(payload["provider_attempts"][0]["provider"], "openai")
+        self.assertEqual(payload["provider_attempts"][1]["provider"], "ollama")
 
     def test_provider_is_usable_unimplemented_transport(self) -> None:
         with mock.patch("borisbot.guide.server.get_secret_status", return_value={"azure": {"configured": True}}), mock.patch.dict(
@@ -478,6 +512,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("Show Setup Plan", html)
         self.assertIn("showOllamaSetupPlan()", html)
         self.assertIn("clearChatHistory()", html)
+        self.assertIn("Assistant Chat", html)
+        self.assertIn("sendAssistantPrompt()", html)
         self.assertIn("provider-cards", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
