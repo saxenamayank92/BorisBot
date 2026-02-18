@@ -125,6 +125,12 @@ POLICY_PACKS: dict[str, dict[str, object]] = {
     },
 }
 
+POLICY_PACK_DESCRIPTIONS = {
+    "safe-local": "Local-first with conservative tool prompts and no scheduler/web-fetch.",
+    "web-readonly": "Browser + web read access with shell denied by default.",
+    "automation": "High-autonomy defaults with all core tools allowed.",
+}
+
 def ensure_dirs():
     BORISBOT_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -857,6 +863,29 @@ def policy_apply(
     typer.echo(f"  primary_provider: {payload['primary_provider']}")
     typer.echo(f"  provider_chain: {', '.join(payload['provider_chain'])}")
     typer.echo(f"  permissions_applied: {len(applied_permissions)}")
+
+
+@app.command("policy-list")
+def policy_list(
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """List available policy packs."""
+    if not isinstance(json_output, bool):
+        json_output = False
+    rows = []
+    for name in sorted(POLICY_PACKS.keys()):
+        rows.append(
+            {
+                "policy": name,
+                "description": POLICY_PACK_DESCRIPTIONS.get(name, ""),
+            }
+        )
+    if json_output:
+        typer.echo(json.dumps({"items": rows}, indent=2))
+        return
+    typer.echo("POLICY PACKS")
+    for row in rows:
+        typer.echo(f"  - {row['policy']}: {row['description']}")
 
 
 @app.command("provider-status")

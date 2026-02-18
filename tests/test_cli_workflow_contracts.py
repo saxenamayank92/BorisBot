@@ -18,6 +18,7 @@ from borisbot.cli import (
     llm_setup,
     lint_workflow,
     policy_apply,
+    policy_list,
     plan_preview,
     permissions,
     provider_status,
@@ -468,6 +469,22 @@ class CliWorkflowContractTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(payload["policy"], "safe-local")
+
+    def test_policy_list_human_output(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            policy_list(json_output=False)
+        text = output.getvalue()
+        self.assertIn("POLICY PACKS", text)
+        self.assertIn("safe-local", text)
+
+    def test_policy_list_json_output(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            policy_list(json_output=True)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(isinstance(payload.get("items"), list))
+        self.assertGreaterEqual(len(payload["items"]), 1)
 
     def test_llm_setup_fails_when_missing_without_auto_install(self) -> None:
         with mock.patch("borisbot.cli.shutil.which", return_value=None):
