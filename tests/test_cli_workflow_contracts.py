@@ -29,6 +29,8 @@ from borisbot.cli import (
     session_status,
     setup,
     set_permission,
+    trace_list,
+    trace_show,
 )
 from borisbot.cli import _compute_lint_violations
 from borisbot.cli import _format_record_runtime_error
@@ -301,6 +303,47 @@ class CliWorkflowContractTests(unittest.TestCase):
                     provider_test(provider_name="openai", model_name="gpt-4o-mini")
             self.assertEqual(cm.exception.exit_code, 1)
             self.assertIn("PROVIDER TEST: FAIL", output.getvalue())
+
+    def test_trace_list_human_output(self) -> None:
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "items": [
+                {"trace_id": "trace_1", "type": "plan_preview", "stage_count": 2, "last_event": "planner_validated"}
+            ]
+        }
+        with mock.patch("borisbot.cli.httpx.get", return_value=response):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                trace_list(json_output=False)
+            text = output.getvalue()
+            self.assertIn("TRACE LIST: OK", text)
+            self.assertIn("trace_1", text)
+
+    def test_trace_show_json_output(self) -> None:
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "trace_id": "trace_1",
+            "type": "plan_preview",
+            "created_at": "2026-01-01T00:00:00",
+            "stages": [{"event": "planner_requested", "timestamp": "2026-01-01T00:00:01"}],
+        }
+        with mock.patch("borisbot.cli.httpx.get", return_value=response):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                trace_show("trace_1", json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["trace_id"], "trace_1")
+
+    def test_trace_show_fail_exits_nonzero(self) -> None:
+        response = mock.Mock(status_code=404)
+        response.json.return_value = {"error": "trace_not_found"}
+        with mock.patch("borisbot.cli.httpx.get", return_value=response):
+            output = io.StringIO()
+            with self.assertRaises(typer.Exit) as cm:
+                with redirect_stdout(output):
+                    trace_show("missing", json_output=False)
+            self.assertEqual(cm.exception.exit_code, 1)
+            self.assertIn("TRACE SHOW: FAIL", output.getvalue())
 
     def test_assistant_chat_human_ok(self) -> None:
         with mock.patch("borisbot.cli.get_agent_tool_permission_sync", return_value="allow"), mock.patch(

@@ -11,6 +11,7 @@ import re
 import httpx
 import socket
 import io
+from urllib.parse import quote
 from contextlib import redirect_stdout
 from datetime import datetime
 from copy import deepcopy
@@ -1153,6 +1154,99 @@ def session_status(
         typer.echo("Self-heal: probe OK")
     else:
         typer.echo("Self-heal: probe failed or unavailable")
+
+
+def _fetch_guide_json(host: str, port: int, path: str) -> dict:
+    """Fetch JSON payload from the guide server and validate response status."""
+    url = f"http://{host}:{port}{path}"
+    response = httpx.get(url, timeout=2.0)
+    if response.status_code != 200:
+        raise RuntimeError(f"guide request failed: HTTP {response.status_code} for {path}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"guide request failed: non-object payload for {path}")
+    return payload
+
+
+@app.command("trace-list")
+def trace_list(
+    host: str = typer.Option("127.0.0.1", "--host", help="Guide server host"),
+    port: int = typer.Option(7788, "--port", help="Guide server port"),
+    trace_type: str = typer.Option("all", "--type", help="Trace type filter (all|plan_preview|assistant_chat|action_run)"),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON payload"),
+):
+    """List recent planner/assistant/action traces from guide server."""
+    if not isinstance(trace_type, str):
+        trace_type = "all"
+    if not isinstance(json_output, bool):
+        json_output = False
+    try:
+        payload = _fetch_guide_json(host, port, "/api/traces")
+    except Exception as exc:
+        typer.echo("TRACE LIST: FAIL")
+        typer.echo(f"  error: {exc}")
+        raise typer.Exit(code=1)
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        items = []
+    selected_type = str(trace_type).strip() or "all"
+    if selected_type != "all":
+        items = [row for row in items if isinstance(row, dict) and str(row.get("type", "")) == selected_type]
+    if json_output:
+        typer.echo(json.dumps({"items": items}, indent=2))
+        return
+    typer.echo("TRACE LIST: OK")
+    typer.echo(f"  count: {len(items)}")
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        trace_id = str(row.get("trace_id", "unknown"))
+        kind = str(row.get("type", "unknown"))
+        stage_count = int(row.get("stage_count", 0))
+        last_event = str(row.get("last_event", "n/a"))
+        typer.echo(f"  {trace_id} | {kind} | stages={stage_count} | last={last_event}")
+
+
+@app.command("trace-show")
+def trace_show(
+    trace_id: str,
+    host: str = typer.Option("127.0.0.1", "--host", help="Guide server host"),
+    port: int = typer.Option(7788, "--port", help="Guide server port"),
+    json_output: bool = typer.Option(False, "--json", help="Print full trace JSON payload"),
+):
+    """Show full trace details by trace id from guide server."""
+    if not isinstance(trace_id, str):
+        trace_id = ""
+    if not isinstance(json_output, bool):
+        json_output = False
+    trace_key = str(trace_id).strip()
+    if not trace_key:
+        typer.echo("TRACE SHOW: FAIL")
+        typer.echo("  error: trace_id is required")
+        raise typer.Exit(code=1)
+    try:
+        payload = _fetch_guide_json(host, port, f"/api/traces/{quote(trace_key, safe='')}")
+    except Exception as exc:
+        typer.echo("TRACE SHOW: FAIL")
+        typer.echo(f"  error: {exc}")
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    stages = payload.get("stages", [])
+    if not isinstance(stages, list):
+        stages = []
+    typer.echo("TRACE SHOW: OK")
+    typer.echo(f"  trace_id: {payload.get('trace_id', trace_key)}")
+    typer.echo(f"  type: {payload.get('type', 'unknown')}")
+    typer.echo(f"  created_at: {payload.get('created_at', 'unknown')}")
+    typer.echo(f"  stages: {len(stages)}")
+    for index, stage in enumerate(stages, start=1):
+        if not isinstance(stage, dict):
+            continue
+        event = str(stage.get("event", "unknown"))
+        ts = str(stage.get("timestamp", ""))
+        typer.echo(f"    {index}. {event} {ts}".rstrip())
 
 
 class _ReplayRouter:
