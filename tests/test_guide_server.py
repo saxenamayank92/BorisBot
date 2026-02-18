@@ -231,6 +231,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("sendChatPrompt()", html)
         self.assertIn("Provider Onboarding", html)
         self.assertIn("refreshProviderSecrets()", html)
+        self.assertIn("clearChatHistory()", html)
 
 
 if __name__ == "__main__":

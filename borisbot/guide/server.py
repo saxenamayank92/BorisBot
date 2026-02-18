@@ -25,6 +25,11 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 import httpx
 
 from borisbot.llm.errors import LLMInvalidOutputError
+from borisbot.guide.chat_history_store import (
+    append_chat_message,
+    clear_chat_history,
+    load_chat_history,
+)
 from borisbot.llm.planner_contract import parse_planner_output
 from borisbot.llm.planner_validator import validate_and_convert_plan
 from borisbot.llm.cost_guard import CostGuard
@@ -591,6 +596,11 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/profile":
                 self._json_response(load_profile())
                 return
+            if self.path.startswith("/api/chat-history"):
+                query = parse_qs(urlsplit(self.path).query)
+                agent_id = str(query.get("agent_id", ["default"])[0]).strip() or "default"
+                self._json_response({"agent_id": agent_id, "items": load_chat_history(agent_id)})
+                return
             if self.path == "/api/provider-secrets":
                 self._json_response({"providers": get_secret_status()})
                 return
@@ -685,6 +695,24 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self._json_response({"providers": providers}, status=HTTPStatus.OK)
+                return
+            if self.path == "/api/chat-history":
+                payload = self._read_json()
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                role = str(payload.get("role", "")).strip()
+                text = str(payload.get("text", "")).strip()
+                try:
+                    items = append_chat_message(agent_id, role, text)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response({"agent_id": agent_id, "items": items}, status=HTTPStatus.OK)
+                return
+            if self.path == "/api/chat-clear":
+                payload = self._read_json()
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                clear_chat_history(agent_id)
+                self._json_response({"agent_id": agent_id, "items": []}, status=HTTPStatus.OK)
                 return
             if self.path == "/api/permissions":
                 payload = self._read_json()
@@ -1015,7 +1043,7 @@ def _render_html(workflows: list[str]) -> str:
         <label for="task">New task id for recording</label>
         <input id="task" value="wf_demo" />
         <label for="agent">Agent id</label>
-        <input id="agent" value="default" onchange="refreshPermissions()" />
+        <input id="agent" value="default" onchange="refreshPermissions();loadChatHistory();" />
         <label for="start">Start URL for recording</label>
         <input id="start" value="https://example.com" />
         <label for="model">Ollama model</label>
@@ -1085,6 +1113,7 @@ def _render_html(workflows: list[str]) -> str:
           <textarea id="chat-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Open LinkedIn, scan posts, and like one post about AI tooling."></textarea>
           <div class="actions">
             <button class="secondary" onclick="sendChatPrompt()">Send To Planner</button>
+            <button onclick="clearChatHistory()">Clear Chat</button>
           </div>
           <pre id="chat-history" style="margin-top:8px;min-height:120px;max-height:220px;"></pre>
         </div>
@@ -1425,12 +1454,55 @@ def _render_html(workflows: list[str]) -> str:
       document.getElementById('chat-history').textContent = text || 'No planner messages yet.';
     }}
 
+    async function loadChatHistory() {{
+      const agentId = document.getElementById('agent').value || 'default';
+      try {{
+        const response = await fetch(`/api/chat-history?agent_id=${{encodeURIComponent(agentId)}}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        chatHistory = items;
+        renderChatHistory();
+      }} catch (e) {{
+        // ignore chat load failures
+      }}
+    }}
+
+    async function appendChatHistory(role, text) {{
+      const agentId = document.getElementById('agent').value || 'default';
+      try {{
+        await fetch('/api/chat-history', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{agent_id: agentId, role, text}})
+        }});
+      }} catch (e) {{
+        // ignore chat save failures
+      }}
+    }}
+
+    async function clearChatHistory() {{
+      const agentId = document.getElementById('agent').value || 'default';
+      try {{
+        await fetch('/api/chat-clear', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{agent_id: agentId}})
+        }});
+      }} catch (e) {{
+        // ignore chat clear failures
+      }}
+      chatHistory = [];
+      renderChatHistory();
+    }}
+
     async function sendChatPrompt() {{
       const input = document.getElementById('chat-input');
       const prompt = (input.value || '').trim();
       if (!prompt) return;
       chatHistory.push({{ role: 'user', text: prompt }});
       renderChatHistory();
+      appendChatHistory('user', prompt);
       const response = await fetch('/api/plan-preview', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
@@ -1442,7 +1514,9 @@ def _render_html(workflows: list[str]) -> str:
       }});
       const data = await response.json();
       if (!response.ok) {{
-        chatHistory.push({{ role: 'planner', text: 'Dry-run failed: ' + (data.error || 'unknown error') }});
+        const msg = 'Dry-run failed: ' + (data.error || 'unknown error');
+        chatHistory.push({{ role: 'planner', text: msg }});
+        appendChatHistory('planner', msg);
         renderChatHistory();
         return;
       }}
@@ -1455,7 +1529,9 @@ def _render_html(workflows: list[str]) -> str:
         required_permissions: data.required_permissions || [],
         commands: (data.validated_commands || []).map(c => c.action),
       }};
-      chatHistory.push({{ role: 'planner', text: JSON.stringify(summary, null, 2) }});
+      const plannerText = JSON.stringify(summary, null, 2);
+      chatHistory.push({{ role: 'planner', text: plannerText }});
+      appendChatHistory('planner', plannerText);
       renderChatHistory();
       input.value = '';
       refreshTraces();
@@ -1646,7 +1722,7 @@ def _render_html(workflows: list[str]) -> str:
     refreshPermissions();
     refreshRuntimeStatus();
     refreshTraces();
-    renderChatHistory();
+    loadChatHistory();
     setInterval(refreshRuntimeStatus, 5000);
     setInterval(refreshTraces, 5000);
   </script>
