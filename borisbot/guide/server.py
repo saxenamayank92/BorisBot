@@ -1366,6 +1366,21 @@ class GuideState:
                     return
 
 
+def _build_support_bundle(state: GuideState, agent_id: str) -> dict:
+    """Build compact diagnostic bundle for runtime + trace debugging."""
+    agent = str(agent_id).strip() or "default"
+    traces = state.list_traces()
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "agent_id": agent,
+        "runtime_status": state.runtime_status(),
+        "profile": load_profile(),
+        "permissions": get_agent_permission_matrix_sync(agent),
+        "trace_summaries": state.list_trace_summaries(),
+        "recent_traces": traces[:5],
+    }
+
+
 def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
     class GuideHandler(BaseHTTPRequestHandler):
         def _json_response(self, payload: dict, status: int = HTTPStatus.OK) -> None:
@@ -1424,6 +1439,11 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 agent_id = str(query.get("agent_id", ["default"])[0]).strip() or "default"
                 matrix = get_agent_permission_matrix_sync(agent_id)
                 self._json_response({"agent_id": agent_id, "permissions": matrix})
+                return
+            if self.path.startswith("/api/support-bundle"):
+                query = parse_qs(urlsplit(self.path).query)
+                agent_id = str(query.get("agent_id", ["default"])[0]).strip() or "default"
+                self._json_response(_build_support_bundle(state, agent_id))
                 return
             if self.path == "/api/traces":
                 self._json_response({"items": state.list_trace_summaries()})
@@ -2148,6 +2168,7 @@ def _render_html(workflows: list[str]) -> str:
           <button class="secondary" onclick="loadSelectedTrace()">View Trace</button>
           <button class="secondary" onclick="handoffSelectedAssistantTrace()">Handoff Trace To Planner</button>
           <button onclick="exportSelectedTrace()">Export Trace JSON</button>
+          <button class="secondary" onclick="exportSupportBundle()">Export Support Bundle</button>
         </div>
         <pre id="trace-summary" style="margin-bottom:10px;min-height:90px;max-height:170px;">No trace selected.</pre>
         <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
@@ -3079,6 +3100,32 @@ def _render_html(workflows: list[str]) -> str:
         document.getElementById('meta').textContent = `Trace exported: ${{traceId}}.json`;
       }} catch (e) {{
         document.getElementById('meta').textContent = 'Trace export failed.';
+      }}
+    }}
+
+    async function exportSupportBundle() {{
+      const agentId = document.getElementById('agent').value || 'default';
+      try {{
+        const response = await fetch(`/api/support-bundle?agent_id=${{encodeURIComponent(agentId)}}`);
+        if (!response.ok) {{
+          document.getElementById('meta').textContent = 'Support bundle export failed.';
+          return;
+        }}
+        const bundle = await response.json();
+        const ts = (bundle.generated_at || '').replace(/[:]/g, '-');
+        const filename = `borisbot-support-${{agentId}}-${{ts || 'latest'}}.json`;
+        const blob = new Blob([JSON.stringify(bundle, null, 2)], {{ type: 'application/json' }});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        document.getElementById('meta').textContent = `Support bundle exported: ${{filename}}`;
+      }} catch (e) {{
+        document.getElementById('meta').textContent = 'Support bundle export failed.';
       }}
     }}
 

@@ -13,6 +13,7 @@ from borisbot.guide.server import (
     _resolve_ollama_start_command,
     _resolve_model_for_provider,
     _build_assistant_response,
+    _build_support_bundle,
     _extract_handoff_intent_from_assistant_trace,
     _build_dry_run_preview,
     _build_live_cost_estimate,
@@ -570,6 +571,28 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(latest["stage_count"], 2)
         self.assertEqual(latest["last_event"], "planner_validated")
 
+    def test_build_support_bundle_contains_runtime_permissions_and_traces(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        trace = state.add_plan_trace(
+            agent_id="default",
+            model_name="llama3.2:3b",
+            intent="check",
+            preview={"status": "ok"},
+        )
+        with mock.patch.object(state, "runtime_status", return_value={"provider_name": "ollama"}), mock.patch(
+            "borisbot.guide.server.load_profile",
+            return_value={"agent_name": "default"},
+        ), mock.patch(
+            "borisbot.guide.server.get_agent_permission_matrix_sync",
+            return_value={"browser": "allow"},
+        ):
+            bundle = _build_support_bundle(state, "default")
+        self.assertEqual(bundle["agent_id"], "default")
+        self.assertIn("runtime_status", bundle)
+        self.assertIn("permissions", bundle)
+        self.assertTrue(bundle["trace_summaries"])
+        self.assertEqual(bundle["recent_traces"][0]["trace_id"], trace["trace_id"])
+
     def test_render_html_includes_one_touch_setup(self) -> None:
         html = _render_html(["workflows/sample.json"])
         self.assertIn("One-Touch LLM Setup", html)
@@ -597,6 +620,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("refreshCostEstimator()", html)
         self.assertIn("trace-summary", html)
         self.assertIn("renderTraceSummary(trace)", html)
+        self.assertIn("Export Support Bundle", html)
+        self.assertIn("exportSupportBundle()", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(
