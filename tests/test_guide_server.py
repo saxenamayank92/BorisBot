@@ -227,6 +227,8 @@ class GuideServerCommandTests(unittest.TestCase):
         html = _render_html(["workflows/sample.json"])
         self.assertIn("One-Touch LLM Setup", html)
         self.assertIn("runOneTouchLlmSetup()", html)
+        self.assertIn("Planner Chat", html)
+        self.assertIn("sendChatPrompt()", html)
 
 
 if __name__ == "__main__":

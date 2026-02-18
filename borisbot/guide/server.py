@@ -1055,6 +1055,16 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('release_check_json')">Release Check JSON</button>
           </div>
         </div>
+
+        <div class="step">
+          <h3>Planner Chat</h3>
+          <p>Ask for a plan in natural language. Response is validated dry-run JSON.</p>
+          <textarea id="chat-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Open LinkedIn, scan posts, and like one post about AI tooling."></textarea>
+          <div class="actions">
+            <button class="secondary" onclick="sendChatPrompt()">Send To Planner</button>
+          </div>
+          <pre id="chat-history" style="margin-top:8px;min-height:120px;max-height:220px;"></pre>
+        </div>
       </section>
 
       <section class="card" id="viewer-card">
@@ -1101,6 +1111,7 @@ def _render_html(workflows: list[str]) -> str:
     let pollHandle = null;
     let viewMode = 'split';
     let lastPlanTraceId = null;
+    let chatHistory = [];
 
     function currentParams() {{
       return {{
@@ -1311,6 +1322,47 @@ def _render_html(workflows: list[str]) -> str:
       refreshTraces();
     }}
 
+    function renderChatHistory() {{
+      const text = chatHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\n\n');
+      document.getElementById('chat-history').textContent = text || 'No planner messages yet.';
+    }}
+
+    async function sendChatPrompt() {{
+      const input = document.getElementById('chat-input');
+      const prompt = (input.value || '').trim();
+      if (!prompt) return;
+      chatHistory.push({{ role: 'user', text: prompt }});
+      renderChatHistory();
+      const response = await fetch('/api/plan-preview', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          intent: prompt,
+          agent_id: document.getElementById('agent').value,
+          model_name: document.getElementById('model').value
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        chatHistory.push({{ role: 'planner', text: 'Dry-run failed: ' + (data.error || 'unknown error') }});
+        renderChatHistory();
+        return;
+      }}
+      lastPlanTraceId = data.trace_id || null;
+      document.getElementById('plan-output').textContent = JSON.stringify(data, null, 2);
+      const summary = {{
+        status: data.status,
+        trace_id: data.trace_id,
+        token_estimate: data.token_estimate || null,
+        required_permissions: data.required_permissions || [],
+        commands: (data.validated_commands || []).map(c => c.action),
+      }};
+      chatHistory.push({{ role: 'planner', text: JSON.stringify(summary, null, 2) }});
+      renderChatHistory();
+      input.value = '';
+      refreshTraces();
+    }}
+
     async function executeApprovedPlan(approvePermission=false) {{
       if (!lastPlanTraceId) {{
         document.getElementById('meta').textContent = 'Run Dry-Run Planner first.';
@@ -1496,6 +1548,7 @@ def _render_html(workflows: list[str]) -> str:
     refreshPermissions();
     refreshRuntimeStatus();
     refreshTraces();
+    renderChatHistory();
     setInterval(refreshRuntimeStatus, 5000);
     setInterval(refreshTraces, 5000);
   </script>
