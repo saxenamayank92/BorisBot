@@ -2008,6 +2008,7 @@ def _render_html(workflows: list[str]) -> str:
     let viewMode = 'split';
     let lastPlanTraceId = null;
     let chatHistory = [];
+    let assistantHistory = [];
     const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
 
     function currentParams() {{
@@ -2349,6 +2350,11 @@ def _render_html(workflows: list[str]) -> str:
       document.getElementById('chat-history').textContent = text || 'No planner messages yet.';
     }}
 
+    function renderAssistantHistory() {{
+      const text = assistantHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\n\n');
+      document.getElementById('assistant-output').textContent = text || 'No assistant responses yet.';
+    }}
+
     async function loadChatHistory() {{
       const agentId = document.getElementById('agent').value || 'default';
       try {{
@@ -2356,8 +2362,10 @@ def _render_html(workflows: list[str]) -> str:
         if (!response.ok) return;
         const data = await response.json();
         const items = Array.isArray(data.items) ? data.items : [];
-        chatHistory = items;
+        chatHistory = items.filter(x => x.role === 'user' || x.role === 'planner');
+        assistantHistory = items.filter(x => x.role === 'assistant_user' || x.role === 'assistant');
         renderChatHistory();
+        renderAssistantHistory();
       }} catch (e) {{
         // ignore chat load failures
       }}
@@ -2388,7 +2396,9 @@ def _render_html(workflows: list[str]) -> str:
         // ignore chat clear failures
       }}
       chatHistory = [];
+      assistantHistory = [];
       renderChatHistory();
+      renderAssistantHistory();
     }}
 
     async function sendChatPrompt() {{
@@ -2463,7 +2473,21 @@ def _render_html(workflows: list[str]) -> str:
         document.getElementById('assistant-output').textContent = 'Assistant failed: ' + (data.message || data.error || 'unknown error');
         return;
       }}
-      document.getElementById('assistant-output').textContent = JSON.stringify(data, null, 2);
+      const summary = {{
+        status: data.status,
+        trace_id: data.trace_id || null,
+        provider_name: data.provider_name || null,
+        token_estimate: data.token_estimate || null,
+        cost_estimate_usd: data.cost_estimate_usd || 0,
+        message: data.message || ''
+      }};
+      assistantHistory.push({{ role: 'assistant_user', text: prompt }});
+      assistantHistory.push({{ role: 'assistant', text: JSON.stringify(summary, null, 2) }});
+      renderAssistantHistory();
+      appendChatHistory('assistant_user', prompt);
+      appendChatHistory('assistant', JSON.stringify(summary, null, 2));
+      refreshTraces();
+      input.value = '';
     }}
 
     async function executeApprovedPlan(approvePermission=false, forceExecute=false) {{
