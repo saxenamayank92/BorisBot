@@ -93,6 +93,18 @@ class GuideServerCommandTests(unittest.TestCase):
             [sys.executable, "-m", "borisbot.cli", "llm-setup", "--model", "llama3.2:3b", "--json"],
         )
 
+    def test_policy_action_commands(self) -> None:
+        cmd = build_action_command(
+            "policy_safe_local",
+            {"agent_id": "default"},
+            workspace=Path.cwd(),
+            python_bin=sys.executable,
+        )
+        self.assertEqual(
+            cmd,
+            [sys.executable, "-m", "borisbot.cli", "policy-apply", "--policy", "safe-local", "--agent-id", "default"],
+        )
+
     def test_session_status_command(self) -> None:
         cmd = build_action_command(
             "session_status",
@@ -144,6 +156,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(required_tool_for_action("record"), "browser")
         self.assertEqual(required_tool_for_action("verify"), "shell")
         self.assertEqual(required_tool_for_action("llm_setup"), "shell")
+        self.assertEqual(required_tool_for_action("policy_automation"), "shell")
         self.assertIsNone(required_tool_for_action("unknown_action"))
 
     def test_extract_required_tools_from_plan(self) -> None:
@@ -622,6 +635,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("renderTraceSummary(trace)", html)
         self.assertIn("Export Support Bundle", html)
         self.assertIn("exportSupportBundle()", html)
+        self.assertIn("Apply Safe-Local", html)
+        self.assertIn("policy_safe_local", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(

@@ -141,6 +141,9 @@ ACTION_TOOL_MAP = {
     "release_check": TOOL_SHELL,
     "release_check_json": TOOL_SHELL,
     "record": TOOL_BROWSER,
+    "policy_safe_local": TOOL_SHELL,
+    "policy_web_readonly": TOOL_SHELL,
+    "policy_automation": TOOL_SHELL,
 }
 
 
@@ -1094,6 +1097,15 @@ def build_action_command(
         return [python_bin, "-m", "borisbot.cli", "release-check", workflow_path]
     if action == "release_check_json":
         return [python_bin, "-m", "borisbot.cli", "release-check", workflow_path, "--json"]
+    if action == "policy_safe_local":
+        agent = params.get("agent_id", "").strip() or "default"
+        return [python_bin, "-m", "borisbot.cli", "policy-apply", "--policy", "safe-local", "--agent-id", agent]
+    if action == "policy_web_readonly":
+        agent = params.get("agent_id", "").strip() or "default"
+        return [python_bin, "-m", "borisbot.cli", "policy-apply", "--policy", "web-readonly", "--agent-id", agent]
+    if action == "policy_automation":
+        agent = params.get("agent_id", "").strip() or "default"
+        return [python_bin, "-m", "borisbot.cli", "policy-apply", "--policy", "automation", "--agent-id", agent]
     if action == "record":
         task_id = params.get("task_id", "").strip() or "wf_new"
         start_url = params.get("start_url", "").strip() or "https://example.com"
@@ -2102,6 +2114,9 @@ def _render_html(workflows: list[str]) -> str:
           <div id="permission-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;"></div>
           <div class="actions">
             <button class="secondary" onclick="refreshPermissions()">Refresh Permissions</button>
+            <button class="secondary" onclick="runAction('policy_safe_local')">Apply Safe-Local</button>
+            <button class="secondary" onclick="runAction('policy_web_readonly')">Apply Web-Readonly</button>
+            <button class="secondary" onclick="runAction('policy_automation')">Apply Automation</button>
           </div>
         </div>
 
@@ -2241,6 +2256,10 @@ def _render_html(workflows: list[str]) -> str:
         return;
       }}
       currentJobId = data.job_id;
+      if (action.startsWith('policy_')) {{
+        refreshPermissions();
+        refreshRuntimeStatus();
+      }}
       startPolling();
       return data;
     }}
