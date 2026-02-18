@@ -387,6 +387,69 @@ def _run_setup_command(command: list[str]) -> tuple[int, str]:
     return int(result.returncode), output.strip()
 
 
+def _build_installer_plan(model_name: str, platform_name: str | None = None) -> dict[str, object]:
+    """Return OS-aware one-touch bootstrap command plan."""
+    model = (model_name or "").strip() or "llama3.2:3b"
+    platform_value = (platform_name or sys.platform).strip().lower()
+    ollama_install: list[str] | None = None
+    install_note = ""
+    if platform_value.startswith("darwin"):
+        if shutil.which("brew"):
+            ollama_install = ["brew", "install", "ollama"]
+        else:
+            install_note = "Homebrew not found; install Homebrew from https://brew.sh first."
+    elif platform_value.startswith("linux"):
+        ollama_install = ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
+    elif platform_value.startswith("win") or os.name == "nt":
+        if shutil.which("winget"):
+            ollama_install = ["winget", "install", "-e", "--id", "Ollama.Ollama"]
+        else:
+            install_note = "winget not found; install Ollama manually from https://ollama.com/download/windows"
+    else:
+        install_note = f"Unsupported platform '{platform_value}' for automatic Ollama install."
+    return {
+        "platform": platform_value,
+        "model_name": model,
+        "steps": [
+            {"id": "docker_check", "command": ["docker", "info"]},
+            {"id": "ollama_install", "command": ollama_install, "note": install_note},
+            {"id": "ollama_start", "command": _resolve_ollama_start_command(platform_value)},
+            {"id": "ollama_pull", "command": ["ollama", "pull", model]},
+            {"id": "bootstrap", "command": [sys.executable, "-m", "borisbot.cli", "setup", "--model", model]},
+        ],
+    }
+
+
+@app.command("installer-plan")
+def installer_plan(
+    model_name: str = typer.Option("llama3.2:3b", "--model"),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON payload"),
+):
+    """Print OS-aware one-touch installation/bootstrap plan."""
+    payload = _build_installer_plan(model_name)
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo("INSTALLER PLAN")
+    typer.echo(f"  platform: {payload['platform']}")
+    typer.echo(f"  model: {payload['model_name']}")
+    steps = payload.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+    for row in steps:
+        if not isinstance(row, dict):
+            continue
+        step_id = str(row.get("id", "step"))
+        command = row.get("command")
+        note = str(row.get("note", "")).strip()
+        if isinstance(command, list) and command:
+            typer.echo(f"  - {step_id}: {' '.join(command)}")
+        else:
+            typer.echo(f"  - {step_id}: (manual)")
+        if note:
+            typer.echo(f"    note: {note}")
+
+
 def _build_doctor_report(model_name: str) -> dict[str, object]:
     """Build deterministic local prerequisite diagnostics snapshot."""
     model = (model_name or "").strip() or "llama3.2:3b"

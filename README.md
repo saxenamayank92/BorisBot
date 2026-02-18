@@ -48,6 +48,9 @@ borisbot trace-show trace_00001 --json
 # Export support diagnostics bundle
 borisbot support-bundle
 
+# Show OS-aware installer/bootstrap plan
+borisbot installer-plan --model llama3.2:3b
+
 # Run golden planner regression suite
 borisbot golden-check
 

@@ -11,6 +11,7 @@ from unittest import mock
 import typer
 
 from borisbot.cli import (
+    _build_installer_plan,
     _resolve_session_provider_model,
     _build_doctor_report,
     _load_and_validate_workflow,
@@ -20,6 +21,7 @@ from borisbot.cli import (
     chat_clear,
     chat_history,
     llm_setup,
+    installer_plan,
     lint_workflow,
     policy_apply,
     policy_list,
@@ -768,6 +770,27 @@ class CliWorkflowContractTests(unittest.TestCase):
             )
             payload = _build_doctor_report("llama3.2:3b")
         self.assertEqual(payload["status"], "ok")
+
+    def test_build_installer_plan_linux(self) -> None:
+        plan = _build_installer_plan("llama3.2:3b", platform_name="linux")
+        self.assertEqual(plan["platform"], "linux")
+        steps = plan["steps"]
+        self.assertTrue(isinstance(steps, list) and steps)
+
+    def test_installer_plan_json_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_installer_plan",
+            return_value={
+                "platform": "linux",
+                "model_name": "llama3.2:3b",
+                "steps": [{"id": "docker_check", "command": ["docker", "info"]}],
+            },
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                installer_plan(model_name="llama3.2:3b", json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["platform"], "linux")
 
     def test_doctor_strict_exits_nonzero_on_warn(self) -> None:
         with mock.patch("borisbot.cli._build_doctor_report", return_value={"status": "warn", "docker": {}, "ollama": {}, "model": "llama3.2:3b"}):
