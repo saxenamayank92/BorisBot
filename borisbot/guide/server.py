@@ -906,6 +906,30 @@ def _build_assistant_response(prompt: str, agent_id: str, model_name: str, provi
     }
 
 
+def _extract_handoff_intent_from_assistant_trace(trace: dict) -> str:
+    """Extract planner handoff intent from assistant chat trace payload."""
+    if not isinstance(trace, dict) or str(trace.get("type", "")).strip() != "assistant_chat":
+        raise ValueError("trace is not assistant_chat")
+    stages = trace.get("stages", [])
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("assistant trace has no stages")
+    created = stages[0]
+    if not isinstance(created, dict):
+        raise ValueError("assistant trace stage is invalid")
+    data = created.get("data", {})
+    if not isinstance(data, dict):
+        raise ValueError("assistant trace data is invalid")
+    response = data.get("response", {})
+    if not isinstance(response, dict):
+        raise ValueError("assistant trace response is invalid")
+    message = str(response.get("message", "")).strip()
+    if not message:
+        raise ValueError("assistant trace has no message")
+    if len(message) > 4000:
+        message = message[:4000].rstrip()
+    return message
+
+
 def extract_browser_ui_url(output: str) -> str:
     """Extract latest noVNC/browser URL printed by recorder output."""
     matches = re.findall(r"Open browser UI at:\s*(https?://\S+)", output or "")
@@ -1501,6 +1525,26 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 response_payload["trace_id"] = trace["trace_id"]
                 self._json_response(response_payload, status=HTTPStatus.OK)
                 return
+            if self.path == "/api/assistant-handoff":
+                payload = self._read_json()
+                trace_id = str(payload.get("trace_id", "")).strip()
+                if not trace_id:
+                    self._json_response({"error": "trace_id required"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                trace = state.get_trace(trace_id)
+                if not isinstance(trace, dict):
+                    self._json_response({"error": "trace_not_found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    intent = _extract_handoff_intent_from_assistant_trace(trace)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(
+                    {"status": "ok", "source_trace_id": trace_id, "intent": intent},
+                    status=HTTPStatus.OK,
+                )
+                return
             if self.path == "/api/chat-clear":
                 payload = self._read_json()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
@@ -1964,6 +2008,7 @@ def _render_html(workflows: list[str]) -> str:
           <textarea id="assistant-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Summarize tradeoffs of deterministic browser automation vs visual agents."></textarea>
           <div class="actions">
             <button class="secondary" onclick="sendAssistantPrompt()">Ask Assistant</button>
+            <button class="secondary" onclick="handoffLastAssistantTrace()">Use Reply As Planner Prompt</button>
             <button onclick="clearAssistantHistory()">Clear Assistant</button>
           </div>
           <pre id="assistant-output" style="margin-top:8px;min-height:120px;max-height:220px;">No assistant responses yet.</pre>
@@ -1981,6 +2026,7 @@ def _render_html(workflows: list[str]) -> str:
         <div class="actions" style="margin-bottom:8px;">
           <select id="trace-select" style="flex:1;min-width:240px;" onchange="loadSelectedTrace()"></select>
           <button class="secondary" onclick="loadSelectedTrace()">View Trace</button>
+          <button class="secondary" onclick="handoffSelectedAssistantTrace()">Handoff Trace To Planner</button>
           <button onclick="exportSelectedTrace()">Export Trace JSON</button>
         </div>
         <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
@@ -2015,6 +2061,7 @@ def _render_html(workflows: list[str]) -> str:
     let pollHandle = null;
     let viewMode = 'split';
     let lastPlanTraceId = null;
+    let lastAssistantTraceId = null;
     let chatHistory = [];
     let assistantHistory = [];
     const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
@@ -2509,8 +2556,47 @@ def _render_html(workflows: list[str]) -> str:
       renderAssistantHistory();
       appendChatHistory('assistant_user', prompt);
       appendChatHistory('assistant', JSON.stringify(summary, null, 2));
+      lastAssistantTraceId = data.trace_id || null;
       refreshTraces();
       input.value = '';
+    }}
+
+    async function handoffAssistantTrace(traceId) {{
+      const id = (traceId || '').trim();
+      if (!id) {{
+        document.getElementById('meta').textContent = 'No assistant trace selected for handoff.';
+        return;
+      }}
+      const response = await fetch('/api/assistant-handoff', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{ trace_id: id }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Assistant handoff failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('prompt').value = data.intent || '';
+      document.getElementById('meta').textContent = `Assistant handoff ready: trace=${{id}}. Review prompt, then run Dry-Run Planner.`;
+    }}
+
+    async function handoffLastAssistantTrace() {{
+      if (!lastAssistantTraceId) {{
+        document.getElementById('meta').textContent = 'No recent assistant trace found. Ask Assistant first.';
+        return;
+      }}
+      return handoffAssistantTrace(lastAssistantTraceId);
+    }}
+
+    async function handoffSelectedAssistantTrace() {{
+      const select = document.getElementById('trace-select');
+      const traceId = select.value;
+      if (!traceId) {{
+        document.getElementById('meta').textContent = 'Select a trace first.';
+        return;
+      }}
+      return handoffAssistantTrace(traceId);
     }}
 
     async function executeApprovedPlan(approvePermission=false, forceExecute=false) {{

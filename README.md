@@ -59,6 +59,7 @@ Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step
 - Planner provider transport support: `ollama`, `openai`, `anthropic`, `google`, and `azure` are implemented for dry-run generation (Azure additionally requires `BORISBOT_AZURE_OPENAI_ENDPOINT`).
 - Permission matrix: set per-agent `prompt|allow|deny` for `assistant`, `browser`, `filesystem`, `shell`, `web_fetch`, and `scheduler`.
 - Planner dry-run and chat: send natural-language prompts, get validated `planner.v1` preview, token estimate, provider-aware cost estimate, required permissions, and persistent per-agent chat history.
+- Assistant-to-planner handoff: convert assistant trace output into a planner prompt draft; review and run dry-run before execution.
 - Budget safety: dry-run planner is blocked when budget state is `blocked`.
 - Runtime provider panel: GUI shows per-provider enabled/configured/usable state with quick diagnostics.
 - Provider connectivity check: GUI button `Test Primary Provider` runs an immediate probe for current provider credentials/connectivity.

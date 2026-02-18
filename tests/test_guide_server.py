@@ -13,6 +13,7 @@ from borisbot.guide.server import (
     _resolve_ollama_start_command,
     _resolve_model_for_provider,
     _build_assistant_response,
+    _extract_handoff_intent_from_assistant_trace,
     _build_dry_run_preview,
     _estimate_preview_cost_usd,
     _generate_plan_raw_with_provider,
@@ -242,6 +243,27 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(payload["provider_name"], "ollama")
         self.assertEqual(payload["provider_attempts"][0]["provider"], "openai")
         self.assertEqual(payload["provider_attempts"][1]["provider"], "ollama")
+
+    def test_extract_handoff_intent_from_assistant_trace(self) -> None:
+        trace = {
+            "type": "assistant_chat",
+            "stages": [
+                {
+                    "event": "created",
+                    "data": {
+                        "response": {
+                            "message": "Open example.com and get page title",
+                        }
+                    },
+                }
+            ],
+        }
+        intent = _extract_handoff_intent_from_assistant_trace(trace)
+        self.assertEqual(intent, "Open example.com and get page title")
+
+    def test_extract_handoff_intent_rejects_non_assistant_trace(self) -> None:
+        with self.assertRaises(ValueError):
+            _extract_handoff_intent_from_assistant_trace({"type": "plan_preview", "stages": []})
 
     def test_provider_is_usable_unimplemented_transport(self) -> None:
         with mock.patch("borisbot.guide.server.get_secret_status", return_value={"azure": {"configured": True}}), mock.patch.dict(
@@ -527,6 +549,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("clearChatHistory()", html)
         self.assertIn("Assistant Chat", html)
         self.assertIn("sendAssistantPrompt()", html)
+        self.assertIn("handoffLastAssistantTrace()", html)
+        self.assertIn("handoffSelectedAssistantTrace()", html)
         self.assertIn("clearAssistantHistory()", html)
         self.assertIn("provider-cards", html)
 
