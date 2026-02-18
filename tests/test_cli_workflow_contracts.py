@@ -26,6 +26,7 @@ from borisbot.cli import (
     provider_test,
     release_check,
     doctor,
+    session_status,
     setup,
     set_permission,
 )
@@ -258,6 +259,32 @@ class CliWorkflowContractTests(unittest.TestCase):
             text = output.getvalue()
             self.assertIn("PROVIDER STATUS", text)
             self.assertIn("openai", text)
+
+    def test_session_status_json_output(self) -> None:
+        with mock.patch(
+            "borisbot.cli._build_session_status",
+            return_value={
+                "provider_name": "ollama",
+                "provider_state": "healthy",
+                "model_name": "llama3.2:3b",
+                "session_tokens": 12,
+                "session_cost_usd": 0.0,
+                "today_cost_usd": 0.0,
+                "daily_limit_usd": 1.0,
+                "daily_remaining_usd": 1.0,
+                "budget_status": "OK",
+                "active_tasks": 0,
+                "queue_depth": 0,
+                "heartbeat_timestamp": "",
+                "heartbeat_age_seconds": -1,
+            },
+        ), mock.patch("borisbot.cli.read_heartbeat_snapshot", return_value={}):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                session_status(json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["provider_name"], "ollama")
+            self.assertEqual(payload["budget_status"], "OK")
 
     def test_provider_test_fail_exits_nonzero(self) -> None:
         with mock.patch("borisbot.cli._probe_provider_connection", return_value=(False, "missing key")):

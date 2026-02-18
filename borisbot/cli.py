@@ -1096,8 +1096,11 @@ def session_status(
         "--model-name",
         help="Primary model label to display",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Print full status snapshot as JSON"),
 ):
     """Print deterministic provider, token, and budget status snapshot."""
+    if not isinstance(json_output, bool):
+        json_output = False
     snapshot = asyncio.run(_build_session_status(agent_id=agent_id, model_name=model_name))
     heartbeat = read_heartbeat_snapshot()
     if isinstance(heartbeat, dict):
@@ -1111,6 +1114,9 @@ def session_status(
                 snapshot["heartbeat_age_seconds"] = -1
         snapshot["self_heal_probe_ok"] = bool(heartbeat.get("self_heal_probe_ok", False))
         snapshot["self_heal_healed"] = bool(heartbeat.get("self_heal_healed", False))
+    if json_output:
+        typer.echo(json.dumps(snapshot, indent=2))
+        return
     typer.echo(f"Provider: {snapshot['provider_name']}:{snapshot['model_name']}")
     typer.echo(f"Health: {snapshot['provider_state']}")
     typer.echo(f"Session tokens: {snapshot['session_tokens']:,}")
