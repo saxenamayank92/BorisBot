@@ -188,9 +188,14 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(preview["error_code"], "LLM_PROVIDER_UNHEALTHY")
 
     def test_provider_is_usable_unimplemented_transport(self) -> None:
-        ok, reason = _provider_is_usable("azure")
+        with mock.patch("borisbot.guide.server.get_secret_status", return_value={"azure": {"configured": True}}), mock.patch.dict(
+            "os.environ",
+            {},
+            clear=False,
+        ):
+            ok, reason = _provider_is_usable("azure")
         self.assertFalse(ok)
-        self.assertEqual(reason, "transport_unimplemented")
+        self.assertEqual(reason, "azure_endpoint_missing")
 
     def test_generate_plan_raw_with_provider_openai(self) -> None:
         class _Resp:
@@ -259,6 +264,33 @@ class GuideServerCommandTests(unittest.TestCase):
             raw = _generate_plan_raw_with_provider("google", "x", "gemini-1.5-flash")
         self.assertIn('"planner_schema_version":"planner.v1"', raw)
 
+    def test_generate_plan_raw_with_provider_azure(self) -> None:
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"planner_schema_version":"planner.v1","intent":"x","proposed_actions":[]}'
+                            }
+                        }
+                    ]
+                }
+
+        with mock.patch("borisbot.guide.server.get_provider_secret", return_value="azure-key"), mock.patch.dict(
+            "os.environ",
+            {"BORISBOT_AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com"},
+            clear=False,
+        ), mock.patch(
+            "borisbot.guide.server.httpx.post",
+            return_value=_Resp(),
+        ):
+            raw = _generate_plan_raw_with_provider("azure", "x", "gpt-4o-mini")
+        self.assertIn('"planner_schema_version":"planner.v1"', raw)
+
     def test_probe_provider_connection_openai_missing_key(self) -> None:
         with mock.patch("borisbot.guide.server.get_provider_secret", return_value=""):
             ok, message = _probe_provider_connection("openai", "gpt-4o-mini")
@@ -276,6 +308,16 @@ class GuideServerCommandTests(unittest.TestCase):
             ok, message = _probe_provider_connection("google", "gemini-1.5-flash")
         self.assertFalse(ok)
         self.assertIn("missing", message.lower())
+
+    def test_probe_provider_connection_azure_missing_endpoint(self) -> None:
+        with mock.patch("borisbot.guide.server.get_provider_secret", return_value="azure-key"), mock.patch.dict(
+            "os.environ",
+            {},
+            clear=False,
+        ):
+            ok, message = _probe_provider_connection("azure", "gpt-4o-mini")
+        self.assertFalse(ok)
+        self.assertIn("endpoint", message.lower())
 
     def test_record_rejects_invalid_url(self) -> None:
         with self.assertRaises(ValueError):

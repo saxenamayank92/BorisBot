@@ -242,8 +242,13 @@ def _provider_is_usable(provider_name: str) -> tuple[bool, str]:
         if shutil.which("ollama") is None:
             return False, "ollama_not_installed"
         return True, ""
-    if provider in {"azure"}:
-        return False, "transport_unimplemented"
+    if provider == "azure":
+        status = get_secret_status().get(provider, {})
+        if not bool(status.get("configured", False)):
+            return False, "api_key_missing"
+        if not os.getenv("BORISBOT_AZURE_OPENAI_ENDPOINT", "").strip():
+            return False, "azure_endpoint_missing"
+        return True, ""
     status = get_secret_status().get(provider, {})
     if not bool(status.get("configured", False)):
         return False, "api_key_missing"
@@ -394,6 +399,47 @@ def _generate_plan_raw_with_google(user_intent: str, model_name: str) -> str:
     return text
 
 
+def _generate_plan_raw_with_azure(user_intent: str, model_name: str) -> str:
+    """Call Azure OpenAI chat completions endpoint and return text output."""
+    api_key = get_provider_secret("azure")
+    if not api_key:
+        raise ValueError("Azure API key missing. Configure it in Provider Onboarding.")
+    endpoint = os.getenv("BORISBOT_AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
+    if not endpoint:
+        raise ValueError("Azure endpoint missing. Set BORISBOT_AZURE_OPENAI_ENDPOINT.")
+    api_version = os.getenv("BORISBOT_AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
+    deployment = model_name
+    prompt = _build_planner_prompt(user_intent)
+    response = httpx.post(
+        f"{endpoint}/openai/deployments/{deployment}/chat/completions",
+        params={"api-version": api_version},
+        headers={"api-key": api_key, "content-type": "application/json"},
+        json={
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Azure generate failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Azure response payload invalid")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Azure response missing choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("Azure response choice invalid")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("Azure response message invalid")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise ValueError("Azure response content invalid")
+    return content
+
+
 def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[bool, str]:
     provider = str(provider_name).strip().lower()
     if provider == "ollama":
@@ -440,6 +486,23 @@ def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[boo
         if response.status_code != 200:
             return False, f"google probe failed: HTTP {response.status_code}"
         return True, f"google reachable ({model_name})"
+    if provider == "azure":
+        api_key = get_provider_secret("azure")
+        if not api_key:
+            return False, "Azure API key missing"
+        endpoint = os.getenv("BORISBOT_AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
+        if not endpoint:
+            return False, "Azure endpoint missing (BORISBOT_AZURE_OPENAI_ENDPOINT)"
+        api_version = os.getenv("BORISBOT_AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
+        response = httpx.get(
+            f"{endpoint}/openai/deployments",
+            params={"api-version": api_version},
+            headers={"api-key": api_key},
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            return False, f"azure probe failed: HTTP {response.status_code}"
+        return True, f"azure reachable ({model_name})"
     return False, f"provider '{provider}' probe not implemented"
 
 
@@ -453,6 +516,8 @@ def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model
         return _generate_plan_raw_with_anthropic(user_intent, model_name=model_name)
     if provider == "google":
         return _generate_plan_raw_with_google(user_intent, model_name=model_name)
+    if provider == "azure":
+        return _generate_plan_raw_with_azure(user_intent, model_name=model_name)
     raise ValueError(f"Provider '{provider}' planner transport is not enabled in this build")
 
 
@@ -2258,8 +2323,16 @@ def _collect_runtime_status(python_bin: str) -> dict:
             reason = "" if usable else "ollama_not_installed"
         elif provider in {"azure"}:
             configured = bool(secret_status.get(provider, {}).get("configured", False))
-            usable = False
-            reason = "transport_unimplemented" if enabled else "disabled"
+            endpoint_ok = bool(os.getenv("BORISBOT_AZURE_OPENAI_ENDPOINT", "").strip())
+            usable = enabled and configured and endpoint_ok
+            if not enabled:
+                reason = "disabled"
+            elif not configured:
+                reason = "api_key_missing"
+            elif not endpoint_ok:
+                reason = "azure_endpoint_missing"
+            else:
+                reason = ""
         else:
             configured = bool(secret_status.get(provider, {}).get("configured", False))
             usable = enabled and configured
