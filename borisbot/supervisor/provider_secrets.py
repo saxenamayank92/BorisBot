@@ -43,6 +43,14 @@ def get_secret_status(path: Path = SECRETS_PATH) -> dict[str, dict[str, str | bo
     return status
 
 
+def get_provider_secret(provider: str, path: Path = SECRETS_PATH) -> str:
+    """Return raw API key for provider or empty string when missing."""
+    name = str(provider).strip().lower()
+    if name not in ALLOWED_SECRET_PROVIDERS:
+        return ""
+    return _load_raw(path).get(name, "")
+
+
 def set_provider_secret(provider: str, api_key: str, path: Path = SECRETS_PATH) -> dict[str, dict[str, str | bool]]:
     name = str(provider).strip().lower()
     if name not in ALLOWED_SECRET_PROVIDERS:

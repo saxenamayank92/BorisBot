@@ -37,7 +37,11 @@ from borisbot.llm.provider_health import get_provider_health_registry
 from borisbot.supervisor.database import get_db
 from borisbot.supervisor.heartbeat_runtime import read_heartbeat_snapshot
 from borisbot.supervisor.profile_config import load_profile, save_profile
-from borisbot.supervisor.provider_secrets import get_secret_status, set_provider_secret
+from borisbot.supervisor.provider_secrets import (
+    get_provider_secret,
+    get_secret_status,
+    set_provider_secret,
+)
 from borisbot.supervisor.tool_permissions import (
     ALLOWED_TOOLS,
     DECISION_ALLOW,
@@ -220,6 +224,8 @@ def _provider_is_usable(provider_name: str) -> tuple[bool, str]:
         if shutil.which("ollama") is None:
             return False, "ollama_not_installed"
         return True, ""
+    if provider in {"anthropic", "google", "azure"}:
+        return False, "transport_unimplemented"
     status = get_secret_status().get(provider, {})
     if not bool(status.get("configured", False)):
         return False, "api_key_missing"
@@ -252,10 +258,49 @@ def _generate_plan_raw_with_ollama(user_intent: str, model_name: str) -> str:
     return output
 
 
+def _generate_plan_raw_with_openai(user_intent: str, model_name: str) -> str:
+    """Call OpenAI chat completions endpoint and return text output."""
+    api_key = get_provider_secret("openai")
+    if not api_key:
+        raise ValueError("OpenAI API key missing. Configure it in Provider Onboarding.")
+    prompt = _build_planner_prompt(user_intent)
+    endpoint = os.getenv("BORISBOT_OPENAI_API_BASE", "https://api.openai.com").rstrip("/")
+    response = httpx.post(
+        f"{endpoint}/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"OpenAI generate failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("OpenAI response payload invalid")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("OpenAI response missing choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("OpenAI response choice invalid")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("OpenAI response message invalid")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise ValueError("OpenAI response content invalid")
+    return content
+
+
 def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model_name: str) -> str:
     provider = str(provider_name).strip().lower()
     if provider == "ollama":
         return _generate_plan_raw_with_ollama(user_intent, model_name=model_name)
+    if provider == "openai":
+        return _generate_plan_raw_with_openai(user_intent, model_name=model_name)
     raise ValueError(f"Provider '{provider}' planner transport is not enabled in this build")
 
 
@@ -1987,6 +2032,10 @@ def _collect_runtime_status(python_bin: str) -> dict:
             configured = ollama_installed
             usable = enabled and ollama_installed
             reason = "" if usable else "ollama_not_installed"
+        elif provider in {"anthropic", "google", "azure"}:
+            configured = bool(secret_status.get(provider, {}).get("configured", False))
+            usable = False
+            reason = "transport_unimplemented" if enabled else "disabled"
         else:
             configured = bool(secret_status.get(provider, {}).get("configured", False))
             usable = enabled and configured

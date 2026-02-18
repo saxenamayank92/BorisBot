@@ -12,6 +12,8 @@ from borisbot.guide.server import (
     _resolve_ollama_start_command,
     _build_dry_run_preview,
     _estimate_preview_cost_usd,
+    _generate_plan_raw_with_provider,
+    _provider_is_usable,
     _estimate_tokens,
     _extract_required_tools_from_plan,
     build_action_command,
@@ -166,6 +168,34 @@ class GuideServerCommandTests(unittest.TestCase):
             )
         self.assertEqual(preview["status"], "failed")
         self.assertEqual(preview["error_code"], "LLM_PROVIDER_UNHEALTHY")
+
+    def test_provider_is_usable_unimplemented_transport(self) -> None:
+        ok, reason = _provider_is_usable("anthropic")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "transport_unimplemented")
+
+    def test_generate_plan_raw_with_provider_openai(self) -> None:
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"planner_schema_version":"planner.v1","intent":"x","proposed_actions":[]}'
+                            }
+                        }
+                    ]
+                }
+
+        with mock.patch("borisbot.guide.server.get_provider_secret", return_value="sk-test"), mock.patch(
+            "borisbot.guide.server.httpx.post",
+            return_value=_Resp(),
+        ):
+            raw = _generate_plan_raw_with_provider("openai", "x", "gpt-4o-mini")
+        self.assertIn('"planner_schema_version":"planner.v1"', raw)
 
     def test_record_rejects_invalid_url(self) -> None:
         with self.assertRaises(ValueError):
