@@ -176,6 +176,22 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertTrue(traces)
         self.assertEqual(traces[0]["trace_id"], trace["trace_id"])
 
+    def test_get_trace_and_append_stage(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        trace = state.add_plan_trace(
+            agent_id="default",
+            model_name="llama3.2:3b",
+            intent="do x",
+            preview={"status": "ok", "validated_commands": [{"id": "1", "action": "get_title", "params": {}}]},
+        )
+        trace_id = trace["trace_id"]
+        state.append_trace_stage(trace_id, {"event": "approved_execute_requested", "task_id": "t1"})
+        got = state.get_trace(trace_id)
+        self.assertIsNotNone(got)
+        assert got is not None
+        stages = got.get("stages", [])
+        self.assertGreaterEqual(len(stages), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

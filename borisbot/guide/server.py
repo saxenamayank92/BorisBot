@@ -404,6 +404,18 @@ class GuideState:
                 },
             )
 
+    def get_trace(self, trace_id: str) -> dict | None:
+        """Fetch trace by id."""
+        with self._lock:
+            for trace in self._traces:
+                if trace.get("trace_id") == trace_id:
+                    return trace
+        return None
+
+    def append_trace_stage(self, trace_id: str, stage_data: dict) -> None:
+        """Append stage to an existing trace."""
+        self._append_trace_stage(trace_id, stage_data)
+
     def get_job(self, job_id: str) -> GuideJob | None:
         with self._lock:
             return self._jobs.get(job_id)
@@ -609,6 +621,113 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 preview["trace_id"] = trace["trace_id"]
                 self._json_response(preview, status=HTTPStatus.OK)
                 return
+            if self.path == "/api/execute-plan":
+                payload = self._read_json()
+                trace_id = str(payload.get("trace_id", "")).strip()
+                if not trace_id:
+                    self._json_response({"error": "trace_id required"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                trace = state.get_trace(trace_id)
+                if not isinstance(trace, dict):
+                    self._json_response({"error": "trace_not_found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                stages = trace.get("stages", [])
+                if not isinstance(stages, list) or not stages:
+                    self._json_response({"error": "trace_has_no_stages"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                latest_preview = {}
+                for stage in reversed(stages):
+                    if isinstance(stage, dict):
+                        data = stage.get("data", {})
+                        if isinstance(data, dict) and isinstance(data.get("preview"), dict):
+                            latest_preview = data["preview"]
+                            break
+                if not isinstance(latest_preview, dict) or latest_preview.get("status") != "ok":
+                    self._json_response(
+                        {"error": "trace_preview_not_executable"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                validated_commands = latest_preview.get("validated_commands", [])
+                if not isinstance(validated_commands, list) or not validated_commands:
+                    self._json_response(
+                        {"error": "trace_has_no_validated_commands"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                required_tool = TOOL_BROWSER
+                decision = get_agent_tool_permission_sync(agent_id, required_tool)
+                approve_permission = bool(payload.get("approve_permission", False))
+                if decision == DECISION_DENY:
+                    self._json_response(
+                        {
+                            "error": "permission_denied",
+                            "agent_id": agent_id,
+                            "tool_name": required_tool,
+                            "message": f"Tool '{required_tool}' is denied for agent '{agent_id}'.",
+                        },
+                        status=HTTPStatus.FORBIDDEN,
+                    )
+                    return
+                if decision == DECISION_PROMPT and not approve_permission:
+                    self._json_response(
+                        {
+                            "error": "permission_required",
+                            "agent_id": agent_id,
+                            "tool_name": required_tool,
+                            "message": (
+                                f"Agent '{agent_id}' requires approval for tool '{required_tool}'."
+                            ),
+                        },
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                if decision == DECISION_PROMPT and approve_permission:
+                    set_agent_tool_permission_sync(agent_id, required_tool, DECISION_ALLOW)
+
+                generated_dir = state.workspace / "workflows" / "generated"
+                generated_dir.mkdir(parents=True, exist_ok=True)
+                task_id = f"plan_{trace_id}_{int(time.time())}"
+                workflow_path = generated_dir / f"{task_id}.json"
+                workflow_payload = {
+                    "schema_version": "task_command.v1",
+                    "task_id": task_id,
+                    "commands": validated_commands,
+                }
+                workflow_path.write_text(json.dumps(workflow_payload, indent=2), encoding="utf-8")
+                state.append_trace_stage(
+                    trace_id,
+                    {
+                        "event": "approved_execute_requested",
+                        "task_id": task_id,
+                        "workflow_path": str(workflow_path),
+                    },
+                )
+                try:
+                    job = state.create_job("replay", {"workflow_path": str(workflow_path)})
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                state.append_trace_stage(
+                    trace_id,
+                    {
+                        "event": "approved_execute_submitted",
+                        "job_id": job.job_id,
+                        "task_id": task_id,
+                    },
+                )
+                self._json_response(
+                    {
+                        "status": "submitted",
+                        "job_id": job.job_id,
+                        "task_id": task_id,
+                        "workflow_path": str(workflow_path),
+                    },
+                    status=HTTPStatus.CREATED,
+                )
+                return
             if self.path.startswith("/api/jobs/") and self.path.endswith("/stop"):
                 parts = self.path.split("/")
                 if len(parts) < 4:
@@ -797,6 +916,7 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="runAction('verify')">Run Verify</button>
             <button onclick="runAction('session_status')">Session Status</button>
             <button onclick="runPlanPreview()">Dry-Run Planner</button>
+            <button onclick="executeApprovedPlan()">Execute Approved Plan</button>
           </div>
         </div>
 
@@ -867,6 +987,7 @@ def _render_html(workflows: list[str]) -> str:
     let currentJobId = null;
     let pollHandle = null;
     let viewMode = 'split';
+    let lastPlanTraceId = null;
 
     function currentParams() {{
       return {{
@@ -914,9 +1035,45 @@ def _render_html(workflows: list[str]) -> str:
       const data = await response.json();
       if (!response.ok) {{
         document.getElementById('plan-output').textContent = 'Dry-run failed: ' + (data.error || 'unknown error');
+        lastPlanTraceId = null;
         return;
       }}
+      lastPlanTraceId = data.trace_id || null;
       document.getElementById('plan-output').textContent = JSON.stringify(data, null, 2);
+      refreshTraces();
+    }}
+
+    async function executeApprovedPlan(approvePermission=false) {{
+      if (!lastPlanTraceId) {{
+        document.getElementById('meta').textContent = 'Run Dry-Run Planner first.';
+        return;
+      }}
+      const response = await fetch('/api/execute-plan', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+          trace_id: lastPlanTraceId,
+          agent_id: document.getElementById('agent').value,
+          approve_permission: approvePermission
+        }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        if (data.error === 'permission_required') {{
+          const ok = window.confirm(`${{data.message}} Approve now?`);
+          if (ok) {{
+            return executeApprovedPlan(true);
+          }}
+          document.getElementById('meta').textContent = 'Permission not granted: ' + (data.tool_name || '');
+          return;
+        }}
+        document.getElementById('meta').textContent = 'Execute failed: ' + (data.error || 'unknown error');
+        return;
+      }}
+      if (data.job_id) {{
+        currentJobId = data.job_id;
+        startPolling();
+      }}
       refreshTraces();
     }}
 
