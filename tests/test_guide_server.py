@@ -13,6 +13,7 @@ from borisbot.guide.server import (
     _build_dry_run_preview,
     _estimate_preview_cost_usd,
     _generate_plan_raw_with_provider,
+    _probe_provider_connection,
     _provider_is_usable,
     _estimate_tokens,
     _extract_required_tools_from_plan,
@@ -197,6 +198,12 @@ class GuideServerCommandTests(unittest.TestCase):
             raw = _generate_plan_raw_with_provider("openai", "x", "gpt-4o-mini")
         self.assertIn('"planner_schema_version":"planner.v1"', raw)
 
+    def test_probe_provider_connection_openai_missing_key(self) -> None:
+        with mock.patch("borisbot.guide.server.get_provider_secret", return_value=""):
+            ok, message = _probe_provider_connection("openai", "gpt-4o-mini")
+        self.assertFalse(ok)
+        self.assertIn("missing", message.lower())
+
     def test_record_rejects_invalid_url(self) -> None:
         with self.assertRaises(ValueError):
             build_action_command(
@@ -315,6 +322,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("sendChatPrompt()", html)
         self.assertIn("Provider Onboarding", html)
         self.assertIn("refreshProviderSecrets()", html)
+        self.assertIn("testPrimaryProvider()", html)
         self.assertIn("clearChatHistory()", html)
         self.assertIn("provider-cards", html)
 

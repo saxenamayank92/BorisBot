@@ -295,6 +295,29 @@ def _generate_plan_raw_with_openai(user_intent: str, model_name: str) -> str:
     return content
 
 
+def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[bool, str]:
+    provider = str(provider_name).strip().lower()
+    if provider == "ollama":
+        response = httpx.get("http://127.0.0.1:11434/api/tags", timeout=5.0)
+        if response.status_code != 200:
+            return False, f"ollama probe failed: HTTP {response.status_code}"
+        return True, "ollama reachable"
+    if provider == "openai":
+        api_key = get_provider_secret("openai")
+        if not api_key:
+            return False, "OpenAI API key missing"
+        endpoint = os.getenv("BORISBOT_OPENAI_API_BASE", "https://api.openai.com").rstrip("/")
+        response = httpx.get(
+            f"{endpoint}/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            return False, f"openai probe failed: HTTP {response.status_code}"
+        return True, f"openai reachable ({model_name})"
+    return False, f"provider '{provider}' probe not implemented"
+
+
 def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model_name: str) -> str:
     provider = str(provider_name).strip().lower()
     if provider == "ollama":
@@ -846,6 +869,20 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     return
                 self._json_response({"providers": providers}, status=HTTPStatus.OK)
                 return
+            if self.path == "/api/provider-test":
+                payload = self._read_json()
+                provider = str(payload.get("provider_name", "ollama")).strip() or "ollama"
+                model_name = str(payload.get("model_name", "llama3.2:3b")).strip() or "llama3.2:3b"
+                try:
+                    ok, message = _probe_provider_connection(provider, model_name)
+                except Exception as exc:
+                    self._json_response({"status": "failed", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(
+                    {"status": "ok" if ok else "failed", "provider_name": provider, "message": message},
+                    status=HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST,
+                )
+                return
             if self.path == "/api/chat-history":
                 payload = self._read_json()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
@@ -1213,6 +1250,7 @@ def _render_html(workflows: list[str]) -> str:
           <div id="provider-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;"></div>
           <div class="actions">
             <button class="secondary" onclick="refreshProviderSecrets()">Refresh Provider Status</button>
+            <button onclick="testPrimaryProvider()">Test Primary Provider</button>
           </div>
         </div>
         <label for="task">New task id for recording</label>
@@ -1559,6 +1597,22 @@ def _render_html(workflows: list[str]) -> str:
         }}
       }}
       await refreshProviderSecrets();
+    }}
+
+    async function testPrimaryProvider() {{
+      const provider_name = document.getElementById('primary_provider').value || 'ollama';
+      const model_name = document.getElementById('model').value || 'llama3.2:3b';
+      const response = await fetch('/api/provider-test', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{ provider_name, model_name }})
+      }});
+      const data = await response.json();
+      if (!response.ok) {{
+        document.getElementById('meta').textContent = 'Provider test failed: ' + (data.message || data.error || 'unknown error');
+        return;
+      }}
+      document.getElementById('meta').textContent = 'Provider test OK: ' + (data.message || provider_name);
     }}
 
     function permissionOptionMarkup(selected) {{
