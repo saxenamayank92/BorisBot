@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlparse, urlsplit
+from urllib.parse import parse_qs, urlencode, urlparse, urlsplit
 
 import httpx
 
@@ -623,7 +623,38 @@ def extract_browser_ui_url(output: str) -> str:
     matches = re.findall(r"Open browser UI at:\s*(https?://\S+)", output or "")
     if not matches:
         return ""
-    return matches[-1].strip()
+    return _normalize_browser_ui_url(matches[-1].strip())
+
+
+def _normalize_browser_ui_url(url: str) -> str:
+    """Normalize browser UI URL to direct noVNC entrypoint with autoconnect defaults."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    if not parts.scheme or not parts.netloc:
+        return raw
+
+    path = parts.path or "/"
+    lowered = path.lower()
+    if lowered in {"", "/"}:
+        path = "/vnc.html"
+    elif lowered == "/novnc.html":
+        path = "/vnc.html"
+
+    query_map = parse_qs(parts.query, keep_blank_values=True)
+    if path.lower() == "/vnc.html":
+        if "autoconnect" not in query_map:
+            query_map["autoconnect"] = ["1"]
+        if "resize" not in query_map:
+            query_map["resize"] = ["remote"]
+        if "reconnect" not in query_map:
+            query_map["reconnect"] = ["1"]
+    query = urlencode(query_map, doseq=True)
+    normalized = f"{parts.scheme}://{parts.netloc}{path}"
+    if query:
+        normalized = f"{normalized}?{query}"
+    return normalized
 
 
 def _trace_already_executed(trace: dict) -> bool:

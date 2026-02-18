@@ -17,6 +17,7 @@ from borisbot.guide.server import (
     _probe_provider_connection,
     _provider_is_usable,
     _trace_already_executed,
+    _normalize_browser_ui_url,
     _estimate_tokens,
     _extract_required_tools_from_plan,
     build_action_command,
@@ -355,7 +356,22 @@ class GuideServerCommandTests(unittest.TestCase):
             "other\n"
             "Open browser UI at: http://localhost:49001\n"
         )
-        self.assertEqual(extract_browser_ui_url(output), "http://localhost:49001")
+        self.assertEqual(
+            extract_browser_ui_url(output),
+            "http://localhost:49001/vnc.html?autoconnect=1&resize=remote&reconnect=1",
+        )
+
+    def test_normalize_browser_ui_url_maps_root_to_vnc_html(self) -> None:
+        self.assertEqual(
+            _normalize_browser_ui_url("http://localhost:6080"),
+            "http://localhost:6080/vnc.html?autoconnect=1&resize=remote&reconnect=1",
+        )
+
+    def test_normalize_browser_ui_url_preserves_existing_query(self) -> None:
+        self.assertEqual(
+            _normalize_browser_ui_url("http://localhost:6080/vnc.html?resize=scale"),
+            "http://localhost:6080/vnc.html?resize=scale&autoconnect=1&reconnect=1",
+        )
 
     def test_create_job_rejects_parallel_browser_jobs(self) -> None:
         state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
