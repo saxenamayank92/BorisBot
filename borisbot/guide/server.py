@@ -27,6 +27,7 @@ import httpx
 from borisbot.llm.errors import LLMInvalidOutputError
 from borisbot.guide.chat_history_store import (
     append_chat_message,
+    clear_chat_roles,
     clear_chat_history,
     load_chat_history,
 )
@@ -1506,6 +1507,12 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 clear_chat_history(agent_id)
                 self._json_response({"agent_id": agent_id, "items": []}, status=HTTPStatus.OK)
                 return
+            if self.path == "/api/chat-clear-assistant":
+                payload = self._read_json()
+                agent_id = str(payload.get("agent_id", "default")).strip() or "default"
+                items = clear_chat_roles(agent_id, {"assistant_user", "assistant"})
+                self._json_response({"agent_id": agent_id, "items": items}, status=HTTPStatus.OK)
+                return
             if self.path == "/api/permissions":
                 payload = self._read_json()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
@@ -1957,6 +1964,7 @@ def _render_html(workflows: list[str]) -> str:
           <textarea id="assistant-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Summarize tradeoffs of deterministic browser automation vs visual agents."></textarea>
           <div class="actions">
             <button class="secondary" onclick="sendAssistantPrompt()">Ask Assistant</button>
+            <button onclick="clearAssistantHistory()">Clear Assistant</button>
           </div>
           <pre id="assistant-output" style="margin-top:8px;min-height:120px;max-height:220px;">No assistant responses yet.</pre>
         </div>
@@ -2398,6 +2406,21 @@ def _render_html(workflows: list[str]) -> str:
       chatHistory = [];
       assistantHistory = [];
       renderChatHistory();
+      renderAssistantHistory();
+    }}
+
+    async function clearAssistantHistory() {{
+      const agentId = document.getElementById('agent').value || 'default';
+      try {{
+        await fetch('/api/chat-clear-assistant', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{agent_id: agentId}})
+        }});
+      }} catch (e) {{
+        // ignore chat clear failures
+      }}
+      assistantHistory = [];
       renderAssistantHistory();
     }}
 

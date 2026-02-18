@@ -527,6 +527,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("clearChatHistory()", html)
         self.assertIn("Assistant Chat", html)
         self.assertIn("sendAssistantPrompt()", html)
+        self.assertIn("clearAssistantHistory()", html)
         self.assertIn("provider-cards", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:

@@ -58,3 +58,20 @@ def clear_chat_history(agent_id: str) -> None:
     path = _history_path(agent_id)
     if path.exists():
         path.unlink()
+
+
+def clear_chat_roles(agent_id: str, roles: set[str]) -> list[dict[str, str]]:
+    """Remove chat items for selected roles and persist remaining history."""
+    role_set = {str(role).strip() for role in roles if str(role).strip()}
+    if not role_set:
+        return load_chat_history(agent_id)
+    items = load_chat_history(agent_id)
+    remaining = [row for row in items if row.get("role") not in role_set]
+    path = _history_path(agent_id)
+    if not remaining:
+        if path.exists():
+            path.unlink()
+        return []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(remaining, indent=2), encoding="utf-8")
+    return remaining
