@@ -224,7 +224,7 @@ def _provider_is_usable(provider_name: str) -> tuple[bool, str]:
         if shutil.which("ollama") is None:
             return False, "ollama_not_installed"
         return True, ""
-    if provider in {"anthropic", "google", "azure"}:
+    if provider in {"google", "azure"}:
         return False, "transport_unimplemented"
     status = get_secret_status().get(provider, {})
     if not bool(status.get("configured", False)):
@@ -295,6 +295,45 @@ def _generate_plan_raw_with_openai(user_intent: str, model_name: str) -> str:
     return content
 
 
+def _generate_plan_raw_with_anthropic(user_intent: str, model_name: str) -> str:
+    """Call Anthropic messages endpoint and return text output."""
+    api_key = get_provider_secret("anthropic")
+    if not api_key:
+        raise ValueError("Anthropic API key missing. Configure it in Provider Onboarding.")
+    prompt = _build_planner_prompt(user_intent)
+    endpoint = os.getenv("BORISBOT_ANTHROPIC_API_BASE", "https://api.anthropic.com").rstrip("/")
+    response = httpx.post(
+        f"{endpoint}/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model_name,
+            "max_tokens": 1200,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=30.0,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Anthropic generate failed: HTTP {response.status_code}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Anthropic response payload invalid")
+    content = payload.get("content")
+    if not isinstance(content, list) or not content:
+        raise ValueError("Anthropic response content invalid")
+    first = content[0]
+    if not isinstance(first, dict):
+        raise ValueError("Anthropic response content item invalid")
+    text = first.get("text")
+    if not isinstance(text, str):
+        raise ValueError("Anthropic response text missing")
+    return text
+
+
 def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[bool, str]:
     provider = str(provider_name).strip().lower()
     if provider == "ollama":
@@ -315,6 +354,19 @@ def _probe_provider_connection(provider_name: str, model_name: str) -> tuple[boo
         if response.status_code != 200:
             return False, f"openai probe failed: HTTP {response.status_code}"
         return True, f"openai reachable ({model_name})"
+    if provider == "anthropic":
+        api_key = get_provider_secret("anthropic")
+        if not api_key:
+            return False, "Anthropic API key missing"
+        endpoint = os.getenv("BORISBOT_ANTHROPIC_API_BASE", "https://api.anthropic.com").rstrip("/")
+        response = httpx.get(
+            f"{endpoint}/v1/models",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            timeout=10.0,
+        )
+        if response.status_code != 200:
+            return False, f"anthropic probe failed: HTTP {response.status_code}"
+        return True, f"anthropic reachable ({model_name})"
     return False, f"provider '{provider}' probe not implemented"
 
 
@@ -324,6 +376,8 @@ def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model
         return _generate_plan_raw_with_ollama(user_intent, model_name=model_name)
     if provider == "openai":
         return _generate_plan_raw_with_openai(user_intent, model_name=model_name)
+    if provider == "anthropic":
+        return _generate_plan_raw_with_anthropic(user_intent, model_name=model_name)
     raise ValueError(f"Provider '{provider}' planner transport is not enabled in this build")
 
 
@@ -2118,7 +2172,7 @@ def _collect_runtime_status(python_bin: str) -> dict:
             configured = ollama_installed
             usable = enabled and ollama_installed
             reason = "" if usable else "ollama_not_installed"
-        elif provider in {"anthropic", "google", "azure"}:
+        elif provider in {"google", "azure"}:
             configured = bool(secret_status.get(provider, {}).get("configured", False))
             usable = False
             reason = "transport_unimplemented" if enabled else "disabled"

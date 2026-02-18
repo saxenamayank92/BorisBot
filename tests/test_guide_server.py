@@ -172,7 +172,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(preview["error_code"], "LLM_PROVIDER_UNHEALTHY")
 
     def test_provider_is_usable_unimplemented_transport(self) -> None:
-        ok, reason = _provider_is_usable("anthropic")
+        ok, reason = _provider_is_usable("google")
         self.assertFalse(ok)
         self.assertEqual(reason, "transport_unimplemented")
 
@@ -199,9 +199,34 @@ class GuideServerCommandTests(unittest.TestCase):
             raw = _generate_plan_raw_with_provider("openai", "x", "gpt-4o-mini")
         self.assertIn('"planner_schema_version":"planner.v1"', raw)
 
+    def test_generate_plan_raw_with_provider_anthropic(self) -> None:
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict:
+                return {
+                    "content": [
+                        {"type": "text", "text": '{"planner_schema_version":"planner.v1","intent":"x","proposed_actions":[]}'}
+                    ]
+                }
+
+        with mock.patch("borisbot.guide.server.get_provider_secret", return_value="sk-ant-test"), mock.patch(
+            "borisbot.guide.server.httpx.post",
+            return_value=_Resp(),
+        ):
+            raw = _generate_plan_raw_with_provider("anthropic", "x", "claude-3-5-sonnet-latest")
+        self.assertIn('"planner_schema_version":"planner.v1"', raw)
+
     def test_probe_provider_connection_openai_missing_key(self) -> None:
         with mock.patch("borisbot.guide.server.get_provider_secret", return_value=""):
             ok, message = _probe_provider_connection("openai", "gpt-4o-mini")
+        self.assertFalse(ok)
+        self.assertIn("missing", message.lower())
+
+    def test_probe_provider_connection_anthropic_missing_key(self) -> None:
+        with mock.patch("borisbot.guide.server.get_provider_secret", return_value=""):
+            ok, message = _probe_provider_connection("anthropic", "claude-3-5-sonnet-latest")
         self.assertFalse(ok)
         self.assertIn("missing", message.lower())
 
