@@ -432,6 +432,19 @@ def extract_browser_ui_url(output: str) -> str:
     return matches[-1].strip()
 
 
+def _trace_already_executed(trace: dict) -> bool:
+    stages = trace.get("stages", [])
+    if not isinstance(stages, list):
+        return False
+    for stage in reversed(stages):
+        if not isinstance(stage, dict):
+            continue
+        event = str(stage.get("event", "")).strip()
+        if event == "approved_execute_submitted":
+            return True
+    return False
+
+
 def build_action_command(
     action: str,
     params: dict[str, str],
@@ -951,12 +964,22 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/execute-plan":
                 payload = self._read_json()
                 trace_id = str(payload.get("trace_id", "")).strip()
+                force_execute = bool(payload.get("force", False))
                 if not trace_id:
                     self._json_response({"error": "trace_id required"}, status=HTTPStatus.BAD_REQUEST)
                     return
                 trace = state.get_trace(trace_id)
                 if not isinstance(trace, dict):
                     self._json_response({"error": "trace_not_found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                if _trace_already_executed(trace) and not force_execute:
+                    self._json_response(
+                        {
+                            "error": "trace_already_executed",
+                            "message": "This trace has already been executed. Re-run with force to execute again.",
+                        },
+                        status=HTTPStatus.CONFLICT,
+                    )
                     return
                 stages = trace.get("stages", [])
                 if not isinstance(stages, list) or not stages:
@@ -1769,7 +1792,7 @@ def _render_html(workflows: list[str]) -> str:
       refreshTraces();
     }}
 
-    async function executeApprovedPlan(approvePermission=false) {{
+    async function executeApprovedPlan(approvePermission=false, forceExecute=false) {{
       if (!lastPlanTraceId) {{
         document.getElementById('meta').textContent = 'Run Dry-Run Planner first.';
         return;
@@ -1780,15 +1803,24 @@ def _render_html(workflows: list[str]) -> str:
         body: JSON.stringify({{
           trace_id: lastPlanTraceId,
           agent_id: document.getElementById('agent').value,
-          approve_permission: approvePermission
+          approve_permission: approvePermission,
+          force: forceExecute
         }})
       }});
       const data = await response.json();
       if (!response.ok) {{
+        if (data.error === 'trace_already_executed') {{
+          const ok = window.confirm(`${{data.message}} Force re-execute now?`);
+          if (ok) {{
+            return executeApprovedPlan(approvePermission, true);
+          }}
+          document.getElementById('meta').textContent = 'Execution skipped: trace already executed.';
+          return;
+        }}
         if (data.error === 'permission_required') {{
           const ok = window.confirm(`${{data.message}} Approve now?`);
           if (ok) {{
-            const result = await executeApprovedPlan(true);
+            const result = await executeApprovedPlan(true, forceExecute);
             refreshPermissions();
             return result;
           }}

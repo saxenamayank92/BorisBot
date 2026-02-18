@@ -15,6 +15,7 @@ from borisbot.guide.server import (
     _generate_plan_raw_with_provider,
     _probe_provider_connection,
     _provider_is_usable,
+    _trace_already_executed,
     _estimate_tokens,
     _extract_required_tools_from_plan,
     build_action_command,
@@ -334,6 +335,15 @@ class GuideServerCommandTests(unittest.TestCase):
             status = _collect_runtime_status(sys.executable)
         self.assertIn("provider_matrix", status)
         self.assertIn("ollama", status["provider_matrix"])
+
+    def test_trace_already_executed_detection(self) -> None:
+        trace = {
+            "stages": [
+                {"event": "created", "data": {}},
+                {"event": "approved_execute_submitted", "data": {"job_id": "job_1"}},
+            ]
+        }
+        self.assertTrue(_trace_already_executed(trace))
 
 
 if __name__ == "__main__":
