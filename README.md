@@ -37,6 +37,9 @@ borisbot plan-preview "Open example.com and read page title" --provider ollama
 
 # Show provider readiness matrix in CLI
 borisbot provider-status
+
+# Probe connectivity for selected provider/model
+borisbot provider-test --provider openai --model gpt-4o-mini
 ```
 
 Then open the shown local URL (default `http://127.0.0.1:7788`) and use the step cards to:
