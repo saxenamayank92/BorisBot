@@ -12,6 +12,7 @@ import typer
 
 from borisbot.cli import _load_and_validate_workflow, lint_workflow, release_check
 from borisbot.cli import _compute_lint_violations
+from borisbot.cli import _format_record_runtime_error
 
 
 class CliWorkflowContractTests(unittest.TestCase):
@@ -182,6 +183,16 @@ class CliWorkflowContractTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["golden_status"], "ok")
             self.assertIn("golden", payload)
+
+    def test_format_record_runtime_error_docker_down(self) -> None:
+        msg = _format_record_runtime_error(
+            RuntimeError("Cannot connect to the Docker daemon at unix:///tmp/docker.sock")
+        )
+        self.assertIn("Docker is not running", msg)
+
+    def test_format_record_runtime_error_session_limit(self) -> None:
+        msg = _format_record_runtime_error(RuntimeError("Maximum browser sessions reached"))
+        self.assertIn("cleanup-browsers", msg)
 
 
 if __name__ == "__main__":

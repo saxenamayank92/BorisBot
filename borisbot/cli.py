@@ -186,7 +186,33 @@ def record(
     start_url: str = typer.Option(..., "--start-url", help="Initial URL to open before recording"),
 ):
     """Record workflow actions and replay immediately for validation."""
-    asyncio.run(run_record(task_id, start_url=start_url))
+    try:
+        asyncio.run(run_record(task_id, start_url=start_url))
+    except RuntimeError as exc:
+        typer.echo(_format_record_runtime_error(exc))
+        raise typer.Exit(code=1)
+
+
+def _format_record_runtime_error(exc: RuntimeError) -> str:
+    """Return compact user-facing guidance for common recorder runtime failures."""
+    message = str(exc).strip()
+    lower = message.lower()
+    if "docker daemon" in lower or "cannot connect to the docker daemon" in lower:
+        return (
+            "Recording failed: Docker is not running.\n"
+            "Start Docker Desktop (or docker service) and retry."
+        )
+    if "maximum browser sessions reached" in lower:
+        return (
+            "Recording failed: Maximum browser sessions reached.\n"
+            "Run `borisbot cleanup-browsers` and retry."
+        )
+    if "address already in use" in lower:
+        return (
+            "Recording failed: Recorder port is already in use.\n"
+            "Stop stale borisbot processes and retry."
+        )
+    return f"Recording failed: {message}"
 
 
 @app.command()
