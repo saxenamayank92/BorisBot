@@ -218,6 +218,24 @@ def _resolve_provider_chain(requested_provider: str) -> list[str]:
     return chain[:5] or ["ollama"]
 
 
+def _resolve_model_for_provider(provider_name: str, requested_model: str) -> str:
+    """Return best model for provider using explicit request then profile settings."""
+    model = str(requested_model).strip()
+    if model:
+        return model
+    profile = load_profile()
+    provider_settings = profile.get("provider_settings", {})
+    provider = str(provider_name).strip().lower()
+    if isinstance(provider_settings, dict):
+        row = provider_settings.get(provider, {})
+        if isinstance(row, dict):
+            candidate = str(row.get("model_name", "")).strip()
+            if candidate:
+                return candidate
+    fallback = str(profile.get("model_name", "llama3.2:3b")).strip()
+    return fallback or "llama3.2:3b"
+
+
 def _provider_is_usable(provider_name: str) -> tuple[bool, str]:
     provider = str(provider_name).strip().lower()
     if provider == "ollama":
@@ -996,7 +1014,10 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
             if self.path == "/api/provider-test":
                 payload = self._read_json()
                 provider = str(payload.get("provider_name", "ollama")).strip() or "ollama"
-                model_name = str(payload.get("model_name", "llama3.2:3b")).strip() or "llama3.2:3b"
+                model_name = _resolve_model_for_provider(
+                    provider,
+                    str(payload.get("model_name", "")).strip(),
+                )
                 try:
                     ok, message = _probe_provider_connection(provider, model_name)
                 except Exception as exc:
@@ -1051,8 +1072,11 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 payload = self._read_json()
                 agent_id = str(payload.get("agent_id", "default")).strip() or "default"
                 intent = str(payload.get("intent", "")).strip()
-                model_name = str(payload.get("model_name", "llama3.2:3b")).strip() or "llama3.2:3b"
                 provider_name = str(payload.get("provider_name", "ollama")).strip() or "ollama"
+                model_name = _resolve_model_for_provider(
+                    provider_name,
+                    str(payload.get("model_name", "")).strip(),
+                )
                 try:
                     preview = _build_dry_run_preview(
                         intent,
@@ -1624,9 +1648,12 @@ def _render_html(workflows: list[str]) -> str:
           ? profile.provider_chain.join(',')
           : 'ollama';
         renderProviderGrid(profile.provider_settings || {{}});
-        if (profile.model_name) {{
-          document.getElementById('model').value = profile.model_name;
-        }}
+        const primary = profile.primary_provider || 'ollama';
+        const providerSettings = profile.provider_settings || {{}};
+        const primaryModel = providerSettings[primary] && providerSettings[primary].model_name
+          ? providerSettings[primary].model_name
+          : '';
+        document.getElementById('model').value = primaryModel || profile.model_name || 'llama3.2:3b';
         refreshProviderSecrets();
       }} catch (e) {{
         // ignore profile load failures

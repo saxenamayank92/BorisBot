@@ -10,6 +10,7 @@ from borisbot.guide.server import (
     _collect_runtime_status,
     _resolve_ollama_install_command,
     _resolve_ollama_start_command,
+    _resolve_model_for_provider,
     _build_dry_run_preview,
     _estimate_preview_cost_usd,
     _generate_plan_raw_with_provider,
@@ -119,6 +120,21 @@ class GuideServerCommandTests(unittest.TestCase):
 
     def test_estimate_tokens_non_empty(self) -> None:
         self.assertGreaterEqual(_estimate_tokens("hello world"), 1)
+
+    def test_resolve_model_for_provider_prefers_requested(self) -> None:
+        model = _resolve_model_for_provider("openai", "gpt-4o-mini")
+        self.assertEqual(model, "gpt-4o-mini")
+
+    def test_resolve_model_for_provider_uses_profile_setting(self) -> None:
+        with mock.patch(
+            "borisbot.guide.server.load_profile",
+            return_value={
+                "model_name": "llama3.2:3b",
+                "provider_settings": {"anthropic": {"model_name": "claude-3-5-sonnet-latest"}},
+            },
+        ):
+            model = _resolve_model_for_provider("anthropic", "")
+        self.assertEqual(model, "claude-3-5-sonnet-latest")
 
     def test_estimate_preview_cost_non_ollama(self) -> None:
         cost = _estimate_preview_cost_usd("openai", 1000, 1000)
