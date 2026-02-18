@@ -196,6 +196,36 @@ def _load_budget_snapshot(agent_id: str) -> dict:
     return asyncio.run(guard.get_budget_status(agent_id))
 
 
+def _resolve_provider_chain(requested_provider: str) -> list[str]:
+    profile = load_profile()
+    raw_chain = profile.get("provider_chain", ["ollama"])
+    chain: list[str] = []
+    if isinstance(raw_chain, list):
+        for item in raw_chain:
+            name = str(item).strip().lower()
+            if name and name not in chain:
+                chain.append(name)
+    preferred = str(requested_provider).strip().lower()
+    if preferred and preferred in chain:
+        chain.remove(preferred)
+        chain.insert(0, preferred)
+    elif preferred:
+        chain.insert(0, preferred)
+    return chain[:5] or ["ollama"]
+
+
+def _provider_is_usable(provider_name: str) -> tuple[bool, str]:
+    provider = str(provider_name).strip().lower()
+    if provider == "ollama":
+        if shutil.which("ollama") is None:
+            return False, "ollama_not_installed"
+        return True, ""
+    status = get_secret_status().get(provider, {})
+    if not bool(status.get("configured", False)):
+        return False, "api_key_missing"
+    return True, ""
+
+
 def _generate_plan_raw_with_ollama(user_intent: str, model_name: str) -> str:
     """Call Ollama generate endpoint and return raw planner output text."""
     if shutil.which("ollama") is None:
@@ -222,6 +252,13 @@ def _generate_plan_raw_with_ollama(user_intent: str, model_name: str) -> str:
     return output
 
 
+def _generate_plan_raw_with_provider(provider_name: str, user_intent: str, model_name: str) -> str:
+    provider = str(provider_name).strip().lower()
+    if provider == "ollama":
+        return _generate_plan_raw_with_ollama(user_intent, model_name=model_name)
+    raise ValueError(f"Provider '{provider}' planner transport is not enabled in this build")
+
+
 def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider_name: str) -> dict:
     """Build dry-run planner preview with strict schema + permission requirements."""
     if not isinstance(intent, str) or not intent.strip():
@@ -235,7 +272,33 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider
             "message": "Planner calls are blocked by budget limits.",
             "budget": budget_status,
         }
-    raw_output = _generate_plan_raw_with_ollama(intent, model_name=model_name)
+    provider_chain = _resolve_provider_chain(provider_name)
+    attempts: list[dict[str, str]] = []
+    raw_output = ""
+    selected_provider = ""
+    for provider in provider_chain:
+        usable, reason = _provider_is_usable(provider)
+        if not usable:
+            attempts.append({"provider": provider, "status": "skipped", "reason": reason})
+            continue
+        try:
+            raw_output = _generate_plan_raw_with_provider(provider, intent, model_name=model_name)
+            selected_provider = provider
+            attempts.append({"provider": provider, "status": "ok"})
+            break
+        except ValueError as exc:
+            attempts.append({"provider": provider, "status": "failed", "reason": str(exc)})
+            continue
+    if not raw_output:
+        return {
+            "status": "failed",
+            "error_class": "llm_provider",
+            "error_code": "LLM_PROVIDER_UNHEALTHY",
+            "message": "No usable provider available for planner dry-run.",
+            "provider_attempts": attempts,
+            "provider_chain": provider_chain,
+            "budget": budget_status,
+        }
     try:
         parsed = parse_planner_output(raw_output)
     except LLMInvalidOutputError as exc:
@@ -270,7 +333,7 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider
     prompt_tokens = _estimate_tokens(_build_planner_prompt(intent))
     completion_tokens = _estimate_tokens(raw_output)
     estimated_cost = _estimate_preview_cost_usd(
-        provider_name,
+        selected_provider,
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
     )
@@ -285,7 +348,9 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider
             "total_tokens": prompt_tokens + completion_tokens,
         },
         "cost_estimate_usd": estimated_cost,
-        "provider_name": provider_name,
+        "provider_name": selected_provider,
+        "provider_attempts": attempts,
+        "provider_chain": provider_chain,
         "raw_output": raw_output,
         "budget": budget_status,
     }

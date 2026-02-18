@@ -130,6 +130,42 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(preview["status"], "failed")
         self.assertEqual(preview["error_code"], "BUDGET_BLOCKED")
 
+    def test_build_dry_run_preview_falls_back_to_ollama(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": False}), mock.patch(
+            "borisbot.guide.server._resolve_provider_chain", return_value=["openai", "ollama"]
+        ), mock.patch(
+            "borisbot.guide.server._provider_is_usable",
+            side_effect=[(False, "api_key_missing"), (True, "")],
+        ), mock.patch(
+            "borisbot.guide.server._generate_plan_raw_with_provider",
+            return_value='{"planner_schema_version":"planner.v1","intent":"x","proposed_actions":[{"action":"get_title","target":"","input":""}]}',
+        ):
+            preview = _build_dry_run_preview(
+                "open page",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="openai",
+            )
+        self.assertEqual(preview["status"], "ok")
+        self.assertEqual(preview["provider_name"], "ollama")
+        self.assertEqual(preview["provider_attempts"][0]["provider"], "openai")
+
+    def test_build_dry_run_preview_fails_when_no_provider_usable(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": False}), mock.patch(
+            "borisbot.guide.server._resolve_provider_chain", return_value=["openai"]
+        ), mock.patch(
+            "borisbot.guide.server._provider_is_usable",
+            return_value=(False, "api_key_missing"),
+        ):
+            preview = _build_dry_run_preview(
+                "open page",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="openai",
+            )
+        self.assertEqual(preview["status"], "failed")
+        self.assertEqual(preview["error_code"], "LLM_PROVIDER_UNHEALTHY")
+
     def test_record_rejects_invalid_url(self) -> None:
         with self.assertRaises(ValueError):
             build_action_command(
