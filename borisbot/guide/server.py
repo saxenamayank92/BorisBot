@@ -2516,6 +2516,23 @@ def _render_html(workflows: list[str]) -> str:
       font-size: 13px;
       line-height: 1.4;
     }}
+    .wizard-nav {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0 12px;
+    }}
+    .wizard-progress {{
+      font-size: 12px;
+      color: var(--muted);
+      margin-left: auto;
+    }}
+    .wizard-page {{
+      display: none;
+    }}
+    .wizard-page.active {{
+      display: block;
+    }}
     .inbox-list, .schedule-list, .wizard-list {{
       display: grid;
       gap: 8px;
@@ -2564,6 +2581,12 @@ def _render_html(workflows: list[str]) -> str:
       <section class="card">
         <label for="workflow">Workflow file</label>
         <select id="workflow">{options}</select>
+        <div class="wizard-nav">
+          <button class="secondary" id="wizard-back" onclick="prevWizardPage()">Back</button>
+          <button id="wizard-next" onclick="nextWizardPage()">Next</button>
+          <span class="wizard-progress" id="wizard-progress">Step 1/1</span>
+        </div>
+        <div class="wizard-page" data-page-title="Setup">
         <div class="step start-here">
           <h3>Start Here</h3>
           <p>Follow these steps in order. Keep <strong>Simple Onboarding</strong> mode on for first run.</p>
@@ -2604,6 +2627,8 @@ def _render_html(workflows: list[str]) -> str:
           <option value="qwen2.5:3b">Fast: qwen2.5:3b</option>
           <option value="mistral:7b">Higher quality: mistral:7b</option>
         </select>
+        </div>
+        <div class="wizard-page" data-page-title="Validate">
         <label for="budget_system_daily" class="advanced-control">System daily budget (USD)</label>
         <input id="budget_system_daily" class="advanced-control" value="" placeholder="e.g. 10" />
         <label for="budget_agent_daily" class="advanced-control">Agent daily budget (USD)</label>
@@ -2719,7 +2744,9 @@ def _render_html(workflows: list[str]) -> str:
           </div>
           <div id="wizard-list" class="wizard-list"></div>
         </div>
+        </div>
 
+        <div class="wizard-page advanced-step" data-page-title="Advanced Workspace">
         <div class="step advanced-step">
           <h3>Task Inbox</h3>
           <p>Capture recurring intents and route them into planner flow.</p>
@@ -2750,6 +2777,7 @@ def _render_html(workflows: list[str]) -> str:
             <button class="secondary" onclick="refreshSchedules()">Refresh Schedules</button>
           </div>
           <div id="schedule-list" class="schedule-list"></div>
+        </div>
         </div>
       </section>
 
@@ -2815,6 +2843,40 @@ def _render_html(workflows: list[str]) -> str:
     const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
     const recommendedModels = ['llama3.2:3b', 'qwen2.5:3b', 'mistral:7b'];
     let guideMode = 'simple';
+    let wizardPageIndex = 0;
+
+    function visibleWizardPages() {{
+      const pages = Array.from(document.querySelectorAll('.wizard-page'));
+      return pages.filter(node => !node.classList.contains('hidden'));
+    }}
+
+    function applyWizardPage(nextIndex) {{
+      const pages = visibleWizardPages();
+      if (!pages.length) {{
+        document.getElementById('wizard-progress').textContent = 'Step 0/0';
+        return;
+      }}
+      wizardPageIndex = Math.max(0, Math.min(nextIndex, pages.length - 1));
+      for (const page of document.querySelectorAll('.wizard-page')) {{
+        page.classList.remove('active');
+      }}
+      const active = pages[wizardPageIndex];
+      active.classList.add('active');
+      const title = active.getAttribute('data-page-title') || `Step ${{wizardPageIndex + 1}}`;
+      document.getElementById('wizard-progress').textContent = `Step ${{wizardPageIndex + 1}}/${{pages.length}}: ${{title}}`;
+      const backBtn = document.getElementById('wizard-back');
+      const nextBtn = document.getElementById('wizard-next');
+      if (backBtn) backBtn.disabled = wizardPageIndex === 0;
+      if (nextBtn) nextBtn.disabled = wizardPageIndex >= (pages.length - 1);
+    }}
+
+    function nextWizardPage() {{
+      applyWizardPage(wizardPageIndex + 1);
+    }}
+
+    function prevWizardPage() {{
+      applyWizardPage(wizardPageIndex - 1);
+    }}
 
     function setGuideMode(mode) {{
       guideMode = (mode === 'full') ? 'full' : 'simple';
@@ -2835,6 +2897,7 @@ def _render_html(workflows: list[str]) -> str:
       }} catch (e) {{
         // ignore storage failure
       }}
+      applyWizardPage(0);
     }}
 
     function applyRecommendedModel() {{
@@ -4035,6 +4098,7 @@ def _render_html(workflows: list[str]) -> str:
     }} catch (e) {{
       setGuideMode('simple');
     }}
+    applyWizardPage(0);
     loadProfile();
     syncRecommendedModelFromInput();
     showOllamaSetupPlan();
