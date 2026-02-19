@@ -2304,6 +2304,20 @@ def _render_html(workflows: list[str]) -> str:
       font-size: 12px;
       letter-spacing: 0.02em;
     }}
+    .mode-chip {{
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: rgba(255, 255, 255, 0.76);
+      color: #3b4c57;
+      font-size: 12px;
+      cursor: pointer;
+    }}
+    .mode-chip.active {{
+      background: linear-gradient(135deg, #365564, #284652);
+      color: #fff;
+      border-color: rgba(40, 70, 82, 0.5);
+    }}
     .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 16px; align-items: start; }}
     .card {{
       background: linear-gradient(180deg, var(--panel-strong) 0%, var(--panel) 100%);
@@ -2482,6 +2496,26 @@ def _render_html(workflows: list[str]) -> str:
       padding: 8px;
       background: linear-gradient(170deg, rgba(255,255,255,0.88), rgba(255,252,246,0.82));
     }}
+    .advanced-step.hidden {{
+      display: none;
+    }}
+    .advanced-control.hidden {{
+      display: none;
+    }}
+    .start-here {{
+      border: 1px solid #d7b483;
+      background: linear-gradient(180deg, #fff8ef, #fff4e6);
+    }}
+    .start-here h3 {{
+      margin-bottom: 6px;
+    }}
+    .start-list {{
+      margin: 0;
+      padding-left: 20px;
+      color: var(--ink-soft);
+      font-size: 13px;
+      line-height: 1.4;
+    }}
     .inbox-list, .schedule-list, .wizard-list {{
       display: grid;
       gap: 8px;
@@ -2516,11 +2550,13 @@ def _render_html(workflows: list[str]) -> str:
   <div class="wrap">
     <div class="hero">
       <h1>BorisBot Guided Validation</h1>
-      <p>Use this checklist UI to run reliability actions without memorizing CLI commands.</p>
+      <p>Use this guided workspace to set up BorisBot in minutes, then unlock advanced controls when needed.</p>
       <div class="hero-meta">
         <span class="chip">Local-first runtime</span>
         <span class="chip">Deterministic executor</span>
         <span class="chip">Cost and permission guardrails</span>
+        <button class="mode-chip" id="mode-simple" onclick="setGuideMode('simple')">Simple Onboarding</button>
+        <button class="mode-chip" id="mode-full" onclick="setGuideMode('full')">Full Workspace</button>
       </div>
     </div>
 
@@ -2528,10 +2564,21 @@ def _render_html(workflows: list[str]) -> str:
       <section class="card">
         <label for="workflow">Workflow file</label>
         <select id="workflow">{options}</select>
-        <label for="agent_name">Agent name</label>
-        <input id="agent_name" value="default" />
-        <label for="provider_chain">Provider chain (comma-separated, max 5)</label>
-        <input id="provider_chain" value="ollama" />
+        <div class="step start-here">
+          <h3>Start Here</h3>
+          <p>Follow these steps in order. Keep <strong>Simple Onboarding</strong> mode on for first run.</p>
+          <ol class="start-list">
+            <li>Run One-Touch LLM Setup.</li>
+            <li>Run Bootstrap Setup and Verify.</li>
+            <li>Run Dry-Run Planner.</li>
+            <li>Approve required permissions.</li>
+            <li>Execute approved plan.</li>
+          </ol>
+        </div>
+        <label for="agent_name" class="advanced-control">Agent name</label>
+        <input id="agent_name" class="advanced-control" value="default" />
+        <label for="provider_chain" class="advanced-control">Provider chain (comma-separated, max 5)</label>
+        <input id="provider_chain" class="advanced-control" value="ollama" />
         <label for="primary_provider">Primary provider</label>
         <input id="primary_provider" value="ollama" />
         <div class="step">
@@ -2543,12 +2590,12 @@ def _render_html(workflows: list[str]) -> str:
             <button onclick="testPrimaryProvider()">Test Primary Provider</button>
           </div>
         </div>
-        <label for="task">New task id for recording</label>
-        <input id="task" value="wf_demo" />
+        <label for="task" class="advanced-control">New task id for recording</label>
+        <input id="task" class="advanced-control" value="wf_demo" />
         <label for="agent">Agent id</label>
         <input id="agent" value="default" onchange="refreshPermissions();loadChatHistory();" />
-        <label for="start">Start URL for recording</label>
-        <input id="start" value="https://example.com" />
+        <label for="start" class="advanced-control">Start URL for recording</label>
+        <input id="start" class="advanced-control" value="https://example.com" />
         <label for="model">Ollama model</label>
         <input id="model" value="llama3.2:3b" />
         <label for="recommended_model">Recommended model preset</label>
@@ -2557,12 +2604,12 @@ def _render_html(workflows: list[str]) -> str:
           <option value="qwen2.5:3b">Fast: qwen2.5:3b</option>
           <option value="mistral:7b">Higher quality: mistral:7b</option>
         </select>
-        <label for="budget_system_daily">System daily budget (USD)</label>
-        <input id="budget_system_daily" value="" placeholder="e.g. 10" />
-        <label for="budget_agent_daily">Agent daily budget (USD)</label>
-        <input id="budget_agent_daily" value="" placeholder="e.g. 5" />
-        <label for="budget_monthly">Monthly budget (USD)</label>
-        <input id="budget_monthly" value="" placeholder="e.g. 100" />
+        <label for="budget_system_daily" class="advanced-control">System daily budget (USD)</label>
+        <input id="budget_system_daily" class="advanced-control" value="" placeholder="e.g. 10" />
+        <label for="budget_agent_daily" class="advanced-control">Agent daily budget (USD)</label>
+        <input id="budget_agent_daily" class="advanced-control" value="" placeholder="e.g. 5" />
+        <label for="budget_monthly" class="advanced-control">Monthly budget (USD)</label>
+        <input id="budget_monthly" class="advanced-control" value="" placeholder="e.g. 100" />
         <label for="prompt">Dry-run planner prompt</label>
         <textarea id="prompt" rows="4" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:10px;">Open LinkedIn feed, scroll a few posts, and like one relevant post.</textarea>
         <div class="step">
@@ -2598,7 +2645,7 @@ def _render_html(workflows: list[str]) -> str:
           <pre id="plan-permissions" style="margin-top:8px;min-height:70px;">No plan permissions yet.</pre>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>2. Record Workflow</h3>
           <p>Click start, perform actions in the opened noVNC browser, then click stop.</p>
           <div class="actions">
@@ -2607,7 +2654,7 @@ def _render_html(workflows: list[str]) -> str:
           </div>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>Permission Matrix</h3>
           <p>Set per-agent tool decisions used by dry-run and execution gates.</p>
           <div id="permission-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;"></div>
@@ -2622,7 +2669,7 @@ def _render_html(workflows: list[str]) -> str:
           </div>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>3. Analyze and Lint</h3>
           <p>Score selectors and catch fragile workflows early.</p>
           <div class="actions">
@@ -2631,7 +2678,7 @@ def _render_html(workflows: list[str]) -> str:
           </div>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>4. Replay and Gate</h3>
           <p>Replay deterministically and run release-check in both modes.</p>
           <div class="actions">
@@ -2641,7 +2688,7 @@ def _render_html(workflows: list[str]) -> str:
           </div>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>Planner Chat</h3>
           <p>Ask for a plan in natural language. Response is validated dry-run JSON.</p>
           <textarea id="chat-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Open LinkedIn, scan posts, and like one post about AI tooling."></textarea>
@@ -2652,7 +2699,7 @@ def _render_html(workflows: list[str]) -> str:
           <pre id="chat-history" style="margin-top:8px;min-height:120px;max-height:220px;"></pre>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>Assistant Chat</h3>
           <p>General LLM chat for non-execution tasks (research, drafting, reasoning).</p>
           <textarea id="assistant-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Summarize tradeoffs of deterministic browser automation vs visual agents."></textarea>
@@ -2673,7 +2720,7 @@ def _render_html(workflows: list[str]) -> str:
           <div id="wizard-list" class="wizard-list"></div>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>Task Inbox</h3>
           <p>Capture recurring intents and route them into planner flow.</p>
           <label for="inbox-intent">New inbox intent</label>
@@ -2691,7 +2738,7 @@ def _render_html(workflows: list[str]) -> str:
           <div id="inbox-list" class="inbox-list"></div>
         </div>
 
-        <div class="step">
+        <div class="step advanced-step">
           <h3>Scheduler</h3>
           <p>Create recurring intents that automatically enqueue into Task Inbox.</p>
           <label for="schedule-intent">Schedule intent</label>
@@ -2767,6 +2814,28 @@ def _render_html(workflows: list[str]) -> str:
     let assistantHistory = [];
     const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
     const recommendedModels = ['llama3.2:3b', 'qwen2.5:3b', 'mistral:7b'];
+    let guideMode = 'simple';
+
+    function setGuideMode(mode) {{
+      guideMode = (mode === 'full') ? 'full' : 'simple';
+      const advanced = document.querySelectorAll('.advanced-step');
+      for (const node of advanced) {{
+        node.classList.toggle('hidden', guideMode !== 'full');
+      }}
+      const advancedControls = document.querySelectorAll('.advanced-control');
+      for (const node of advancedControls) {{
+        node.classList.toggle('hidden', guideMode !== 'full');
+      }}
+      const simpleBtn = document.getElementById('mode-simple');
+      const fullBtn = document.getElementById('mode-full');
+      if (simpleBtn) simpleBtn.classList.toggle('active', guideMode === 'simple');
+      if (fullBtn) fullBtn.classList.toggle('active', guideMode === 'full');
+      try {{
+        window.localStorage.setItem('borisbot_guide_mode', guideMode);
+      }} catch (e) {{
+        // ignore storage failure
+      }}
+    }}
 
     function applyRecommendedModel() {{
       const preset = document.getElementById('recommended_model');
@@ -3960,6 +4029,12 @@ def _render_html(workflows: list[str]) -> str:
     }}
 
     setViewMode('split');
+    try {{
+      const storedMode = window.localStorage.getItem('borisbot_guide_mode');
+      setGuideMode(storedMode || 'simple');
+    }} catch (e) {{
+      setGuideMode('simple');
+    }}
     loadProfile();
     syncRecommendedModelFromInput();
     showOllamaSetupPlan();
