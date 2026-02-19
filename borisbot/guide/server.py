@@ -129,6 +129,7 @@ def _build_ollama_setup_plan(
 
 GUIDE_STATE_DIR = Path.home() / ".borisbot"
 GUIDE_WIZARD_STATE_FILE = GUIDE_STATE_DIR / "guide_wizard_state.json"
+ARTIFACTS_DIRNAME = ".borisbot/artifacts"
 
 WIZARD_STEP_DEFS = [
     {"step_id": "docker_ready", "label": "Docker Running"},
@@ -1294,11 +1295,15 @@ class GuideState:
         self._traces: list[dict] = []
         self._inbox_items: list[dict] = []
         self._schedules: list[dict] = []
+        self._dead_letters: list[dict] = []
+        self._artifacts: list[dict] = []
         self._lock = threading.Lock()
         self._counter = 0
         self._trace_counter = 0
         self._inbox_counter = 0
         self._schedule_counter = 0
+        self._dead_letter_counter = 0
+        self._artifact_counter = 0
         self._wizard_state: dict = self._load_wizard_state()
 
     def _load_wizard_state(self) -> dict:
@@ -1458,6 +1463,10 @@ class GuideState:
                 "agent_id": str(agent_id).strip() or "default",
                 "interval_minutes": int(interval_minutes),
                 "enabled": True,
+                "dead_letter": False,
+                "failure_count": 0,
+                "max_retries": 3,
+                "last_error": "",
                 "next_run_at": (now + timedelta(minutes=int(interval_minutes))).isoformat(),
                 "created_at": now.isoformat(),
                 "updated_at": now.isoformat(),
@@ -1473,6 +1482,10 @@ class GuideState:
                 if str(row.get("schedule_id", "")) != key:
                     continue
                 row["enabled"] = bool(enabled)
+                if bool(enabled):
+                    row["dead_letter"] = False
+                    row["failure_count"] = 0
+                    row["last_error"] = ""
                 row["updated_at"] = datetime.utcnow().isoformat()
                 return row
         raise ValueError("schedule not found")
@@ -1499,34 +1512,94 @@ class GuideState:
             for row in self._schedules:
                 if not bool(row.get("enabled", False)):
                     continue
-                next_run_raw = str(row.get("next_run_at", "")).strip()
                 try:
-                    next_run = datetime.fromisoformat(next_run_raw)
-                except Exception:
-                    next_run = now + timedelta(minutes=int(row.get("interval_minutes", 1)))
-                if next_run > now:
-                    continue
-                self._inbox_counter += 1
-                item = {
-                    "item_id": f"inbox_{self._inbox_counter:05d}",
-                    "intent": str(row.get("intent", "")).strip(),
-                    "source": f"schedule:{row.get('schedule_id', '')}",
-                    "priority": "normal",
-                    "status": "open",
-                    "created_at": now.isoformat(),
-                    "updated_at": now.isoformat(),
-                }
-                self._inbox_items.append(item)
-                row["last_enqueued_at"] = now.isoformat()
-                interval = int(row.get("interval_minutes", 1))
-                row["next_run_at"] = (now + timedelta(minutes=interval)).isoformat()
-                row["updated_at"] = now.isoformat()
-                enqueued += 1
+                    next_run_raw = str(row.get("next_run_at", "")).strip()
+                    try:
+                        next_run = datetime.fromisoformat(next_run_raw)
+                    except Exception:
+                        interval_seed = int(row.get("interval_minutes", 1))
+                        next_run = now + timedelta(minutes=interval_seed)
+                    if next_run > now:
+                        continue
+                    interval = int(row.get("interval_minutes", 1))
+                    if interval <= 0:
+                        raise ValueError("interval_minutes must be > 0")
+                    self._inbox_counter += 1
+                    item = {
+                        "item_id": f"inbox_{self._inbox_counter:05d}",
+                        "intent": str(row.get("intent", "")).strip(),
+                        "source": f"schedule:{row.get('schedule_id', '')}",
+                        "priority": "normal",
+                        "status": "open",
+                        "created_at": now.isoformat(),
+                        "updated_at": now.isoformat(),
+                    }
+                    self._inbox_items.append(item)
+                    row["last_enqueued_at"] = now.isoformat()
+                    row["next_run_at"] = (now + timedelta(minutes=interval)).isoformat()
+                    row["updated_at"] = now.isoformat()
+                    row["failure_count"] = 0
+                    row["last_error"] = ""
+                    enqueued += 1
+                except Exception as exc:
+                    row["failure_count"] = int(row.get("failure_count", 0)) + 1
+                    row["last_error"] = str(exc)
+                    row["updated_at"] = now.isoformat()
+                    max_retries = int(row.get("max_retries", 3))
+                    if row["failure_count"] >= max_retries:
+                        row["dead_letter"] = True
+                        row["enabled"] = False
+                        self._dead_letter_counter += 1
+                        self._dead_letters.append(
+                            {
+                                "dead_letter_id": f"dlq_{self._dead_letter_counter:05d}",
+                                "source_type": "schedule",
+                                "source_id": str(row.get("schedule_id", "")),
+                                "error": str(exc),
+                                "created_at": now.isoformat(),
+                            }
+                        )
         return enqueued
 
     def list_schedules(self) -> list[dict]:
         with self._lock:
             return list(reversed(self._schedules[-100:]))
+
+    def list_dead_letters(self) -> list[dict]:
+        with self._lock:
+            return list(reversed(self._dead_letters[-200:]))
+
+    def retry_dead_letter(self, dead_letter_id: str) -> dict:
+        key = str(dead_letter_id).strip()
+        if not key:
+            raise ValueError("dead_letter_id is required")
+        with self._lock:
+            row = None
+            for item in self._dead_letters:
+                if str(item.get("dead_letter_id", "")) == key:
+                    row = item
+                    break
+            if not isinstance(row, dict):
+                raise ValueError("dead letter not found")
+            source_type = str(row.get("source_type", "")).strip()
+            source_id = str(row.get("source_id", "")).strip()
+            if source_type != "schedule":
+                raise ValueError("unsupported dead letter source")
+            schedule = None
+            for sched in self._schedules:
+                if str(sched.get("schedule_id", "")) == source_id:
+                    schedule = sched
+                    break
+            if not isinstance(schedule, dict):
+                raise ValueError("schedule not found for dead letter")
+            interval = int(schedule.get("interval_minutes", 1))
+            schedule["enabled"] = True
+            schedule["dead_letter"] = False
+            schedule["failure_count"] = 0
+            schedule["last_error"] = ""
+            schedule["next_run_at"] = (datetime.utcnow() + timedelta(minutes=interval)).isoformat()
+            self._dead_letters = [x for x in self._dead_letters if str(x.get("dead_letter_id", "")) != key]
+            return schedule
 
     def workflows(self) -> list[str]:
         workflow_dir = self.workspace / "workflows"
@@ -1579,6 +1652,41 @@ class GuideState:
             jobs = [job.to_dict() for job in self._jobs.values()]
         jobs.sort(key=lambda row: row["started_at"], reverse=True)
         return jobs
+
+    def _artifact_dir(self) -> Path:
+        return self.workspace / ARTIFACTS_DIRNAME
+
+    def _record_artifact(self, job: GuideJob) -> dict:
+        output_text = "".join(job.output)
+        browser_ui_url = extract_browser_ui_url(output_text)
+        with self._lock:
+            self._artifact_counter += 1
+            artifact_id = f"artifact_{self._artifact_counter:05d}"
+        now = datetime.utcnow().isoformat()
+        payload = {
+            "artifact_id": artifact_id,
+            "created_at": now,
+            "job_id": job.job_id,
+            "action": job.action,
+            "status": job.status,
+            "returncode": job.returncode,
+            "trace_id": job.trace_id,
+            "browser_ui_url": browser_ui_url,
+            "params": job.params,
+        }
+        artifact_dir = self._artifact_dir()
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / f"{artifact_id}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        (artifact_dir / f"{artifact_id}.log").write_text(output_text, encoding="utf-8")
+        with self._lock:
+            self._artifacts.append(payload)
+            if len(self._artifacts) > 400:
+                self._artifacts = self._artifacts[-400:]
+        return payload
+
+    def list_artifacts(self) -> list[dict]:
+        with self._lock:
+            return list(reversed(self._artifacts[-200:]))
 
     def runtime_status(self) -> dict:
         """Return runtime status snapshot for GUI display."""
@@ -1700,6 +1808,10 @@ class GuideState:
             job.returncode = process.returncode
             job.finished_at = time.time()
             job.status = "completed" if process.returncode == 0 else "failed"
+            try:
+                self._record_artifact(job)
+            except Exception:
+                pass
             if job.trace_id:
                 self._append_trace_stage(
                     job.trace_id,
@@ -1753,6 +1865,8 @@ def _build_support_bundle(state: GuideState, agent_id: str) -> dict:
         "wizard_state": state.get_wizard_state(),
         "task_inbox": state.list_inbox_items()[:20],
         "schedules": state.list_schedules()[:20],
+        "dead_letters": state.list_dead_letters()[:20],
+        "artifacts": state.list_artifacts()[:20],
         "trace_summaries": state.list_trace_summaries(),
         "recent_traces": traces[:5],
     }
@@ -1953,6 +2067,12 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 state.tick_schedules()
                 self._json_response({"items": state.list_schedules()})
                 return
+            if self.path == "/api/dead-letters":
+                self._json_response({"items": state.list_dead_letters()})
+                return
+            if self.path == "/api/artifacts":
+                self._json_response({"items": state.list_artifacts()})
+                return
             if self.path.startswith("/api/ollama-setup-plan"):
                 query = parse_qs(urlsplit(self.path).query)
                 model_name = str(query.get("model_name", ["llama3.2:3b"])[0]).strip() or "llama3.2:3b"
@@ -2150,6 +2270,23 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                     self._json_response({"status": "ok", "items": state.list_schedules()}, status=HTTPStatus.OK)
                     return
                 self._json_response({"error": "unsupported action"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if self.path == "/api/dead-letters":
+                payload = self._read_json()
+                action = str(payload.get("action", "")).strip().lower()
+                if action != "retry":
+                    self._json_response({"error": "unsupported action"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                dead_letter_id = str(payload.get("dead_letter_id", "")).strip()
+                try:
+                    schedule = state.retry_dead_letter(dead_letter_id)
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._json_response(
+                    {"status": "ok", "schedule": schedule, "dead_letters": state.list_dead_letters()},
+                    status=HTTPStatus.OK,
+                )
                 return
             if self.path == "/api/provider-secrets":
                 payload = self._read_json()

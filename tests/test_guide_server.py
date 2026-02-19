@@ -1,6 +1,7 @@
 """Tests for guided UI command mapping and validation."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -752,6 +753,37 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("Daily report", inbox[0]["intent"])
         self.assertIn(sched["schedule_id"], inbox[0]["source"])
 
+    def test_schedule_tick_moves_invalid_schedule_to_dead_letter(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        state.create_schedule("Daily report", 1, agent_id="default")
+        state._schedules[0]["interval_minutes"] = "oops"
+        state._schedules[0]["next_run_at"] = "2000-01-01T00:00:00"
+        state._schedules[0]["max_retries"] = 1
+        queued = state.tick_schedules()
+        self.assertEqual(queued, 0)
+        dead = state.list_dead_letters()
+        self.assertTrue(dead)
+        self.assertEqual(dead[0]["source_type"], "schedule")
+        self.assertFalse(bool(state._schedules[0]["enabled"]))
+
+    def test_record_artifact_writes_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = GuideState(workspace=Path(tmpdir), python_bin=sys.executable)
+            with mock.patch.object(state, "_start_job", return_value=None):
+                job = state.create_job("verify", {"agent_id": "default"})
+            job.status = "completed"
+            job.returncode = 0
+            job.output = ["line one\n", "line two\n"]
+            artifact = state._record_artifact(job)
+            self.assertTrue(artifact["artifact_id"].startswith("artifact_"))
+            items = state.list_artifacts()
+            self.assertTrue(items)
+            self.assertEqual(items[0]["artifact_id"], artifact["artifact_id"])
+            json_path = Path(tmpdir) / ".borisbot" / "artifacts" / f"{artifact['artifact_id']}.json"
+            log_path = Path(tmpdir) / ".borisbot" / "artifacts" / f"{artifact['artifact_id']}.log"
+            self.assertTrue(json_path.exists())
+            self.assertTrue(log_path.exists())
+
     def test_build_support_bundle_contains_runtime_permissions_and_traces(self) -> None:
         state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
         trace = state.add_plan_trace(
@@ -774,6 +806,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("wizard_state", bundle)
         self.assertIn("task_inbox", bundle)
         self.assertIn("schedules", bundle)
+        self.assertIn("dead_letters", bundle)
+        self.assertIn("artifacts", bundle)
         self.assertTrue(bundle["trace_summaries"])
         self.assertEqual(bundle["recent_traces"][0]["trace_id"], trace["trace_id"])
 
