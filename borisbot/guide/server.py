@@ -3031,7 +3031,7 @@ def _render_html(workflows: list[str]) -> str:
           }}
         }}
         if (lines.length) {{
-          document.getElementById('output').textContent = lines.join('\n');
+          document.getElementById('output').textContent = lines.join('\\n');
         }}
         if (payload.status !== 'ok') {{
           const errorCode = payload.error || 'SETUP_FAILED';
@@ -3105,7 +3105,7 @@ def _render_html(workflows: list[str]) -> str:
       if (data.manual_download_url) {{
         lines.push(`download: ${{data.manual_download_url}}`);
       }}
-      document.getElementById('ollama-setup-plan').textContent = lines.join('\n');
+      document.getElementById('ollama-setup-plan').textContent = lines.join('\\n');
     }}
 
     async function loadProfile() {{
@@ -3400,12 +3400,12 @@ def _render_html(workflows: list[str]) -> str:
     }}
 
     function renderChatHistory() {{
-      const text = chatHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\n\n');
+      const text = chatHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\\n\\n');
       document.getElementById('chat-history').textContent = text || 'No planner messages yet.';
     }}
 
     function renderAssistantHistory() {{
-      const text = assistantHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\n\n');
+      const text = assistantHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\\n\\n');
       document.getElementById('assistant-output').textContent = text || 'No assistant responses yet.';
     }}
 
