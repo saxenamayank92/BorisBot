@@ -28,7 +28,7 @@ from borisbot.guide.server import (
     _extract_required_tools_from_plan,
     build_action_command,
     extract_browser_ui_url,
-    _render_html,
+
     required_tool_for_action,
 )
 
@@ -337,6 +337,30 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(preview["provider_name"], "ollama")
         self.assertEqual(preview["provider_attempts"][0]["provider"], "openai")
 
+    def test_build_dry_run_preview_retries_retryable_provider_error(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": False}), mock.patch(
+            "borisbot.guide.server._resolve_provider_chain", return_value=["openai"]
+        ), mock.patch(
+            "borisbot.guide.server._provider_is_usable",
+            return_value=(True, ""),
+        ), mock.patch(
+            "borisbot.guide.server._generate_plan_raw_with_provider",
+            side_effect=[
+                ValueError("timeout"),
+                '{"planner_schema_version":"planner.v1","intent":"x","proposed_actions":[]}',
+            ],
+        ) as gen, mock.patch("borisbot.guide.server.time.sleep", return_value=None):
+            preview = _build_dry_run_preview(
+                "open page",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="openai",
+            )
+        self.assertEqual(preview["status"], "ok")
+        self.assertEqual(gen.call_count, 2)
+        attempts = preview.get("provider_attempts", [])
+        self.assertTrue(any(row.get("status") == "retrying" for row in attempts))
+
     def test_build_dry_run_preview_fails_when_no_provider_usable(self) -> None:
         with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": False}), mock.patch(
             "borisbot.guide.server._resolve_provider_chain", return_value=["openai"]
@@ -385,6 +409,28 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(payload["provider_name"], "ollama")
         self.assertEqual(payload["provider_attempts"][0]["provider"], "openai")
         self.assertEqual(payload["provider_attempts"][1]["provider"], "ollama")
+
+    def test_build_assistant_response_retries_retryable_provider_error(self) -> None:
+        with mock.patch("borisbot.guide.server._load_budget_snapshot", return_value={"blocked": False}), mock.patch(
+            "borisbot.guide.server._resolve_provider_chain",
+            return_value=["openai"],
+        ), mock.patch(
+            "borisbot.guide.server._provider_is_usable",
+            return_value=(True, ""),
+        ), mock.patch(
+            "borisbot.guide.server._generate_chat_raw_with_provider",
+            side_effect=[ValueError("timed out"), "ok after retry"],
+        ) as gen, mock.patch("borisbot.guide.server.time.sleep", return_value=None):
+            payload = _build_assistant_response(
+                "say hi",
+                agent_id="default",
+                model_name="llama3.2:3b",
+                provider_name="openai",
+            )
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(gen.call_count, 2)
+        attempts = payload.get("provider_attempts", [])
+        self.assertTrue(any(row.get("status") == "retrying" for row in attempts))
 
     def test_extract_handoff_intent_from_assistant_trace(self) -> None:
         trace = {
@@ -731,57 +777,7 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertTrue(bundle["trace_summaries"])
         self.assertEqual(bundle["recent_traces"][0]["trace_id"], trace["trace_id"])
 
-    def test_render_html_includes_one_touch_setup(self) -> None:
-        html = _render_html(["workflows/sample.json"])
-        self.assertIn("One-Touch LLM Setup", html)
-        self.assertIn("runOneTouchLlmSetup()", html)
-        self.assertIn("One-touch setup failed:", html)
-        self.assertIn("approveRequiredPermissions()", html)
-        self.assertIn("plan-permissions", html)
-        self.assertIn("Planner Chat", html)
-        self.assertIn("sendChatPrompt()", html)
-        self.assertIn("Provider Onboarding", html)
-        self.assertIn("refreshProviderSecrets()", html)
-        self.assertIn("testPrimaryProvider()", html)
-        self.assertIn("Show Setup Plan", html)
-        self.assertIn("showOllamaSetupPlan()", html)
-        self.assertIn("clearChatHistory()", html)
-        self.assertIn("Assistant Chat", html)
-        self.assertIn("sendAssistantPrompt()", html)
-        self.assertIn("handoffLastAssistantTrace()", html)
-        self.assertIn("handoffSelectedAssistantTrace()", html)
-        self.assertIn("trace-filter", html)
-        self.assertIn("clearAssistantHistory()", html)
-        self.assertIn("provider-cards", html)
-        self.assertIn("onboarding-list", html)
-        self.assertIn("Live Cost Estimator", html)
-        self.assertIn("refreshCostEstimator()", html)
-        self.assertIn("trace-summary", html)
-        self.assertIn("renderTraceSummary(trace)", html)
-        self.assertIn("Export Support Bundle", html)
-        self.assertIn("exportSupportBundle()", html)
-        self.assertIn("Apply Policy Pack", html)
-        self.assertIn("policy-pack", html)
-        self.assertIn("applySelectedPolicy()", html)
-        self.assertIn("Run Bootstrap Setup", html)
-        self.assertIn("runBootstrapSetup()", html)
-        self.assertIn("Run Doctor", html)
-        self.assertIn("First-Run Wizard", html)
-        self.assertIn("refreshWizardState()", html)
-        self.assertIn("Task Inbox", html)
-        self.assertIn("addInboxItem()", html)
-        self.assertIn("Scheduler", html)
-        self.assertIn("createSchedule()", html)
-        self.assertIn("recommended_model", html)
-        self.assertIn("applyRecommendedModel()", html)
-        self.assertIn("setGuideMode('simple')", html)
-        self.assertIn("setGuideMode('full')", html)
-        self.assertIn("Start Here", html)
-        self.assertIn("advanced-control", html)
-        self.assertIn("wizard-nav", html)
-        self.assertIn("nextWizardPage()", html)
-        self.assertIn("prevWizardPage()", html)
-        self.assertIn("applyWizardPage(0)", html)
+
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(

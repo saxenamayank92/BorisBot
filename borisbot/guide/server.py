@@ -195,12 +195,35 @@ ESTIMATED_PRICING_USD_PER_1K = {
     "azure": {"input": 0.005, "output": 0.015},
 }
 
+PROVIDER_MAX_RETRIES = 1
+PROVIDER_RETRY_BACKOFF_SECONDS = 0.35
+
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count deterministically from raw text length."""
     if not text:
         return 0
     return max(1, int(round(len(text) / 4)))
+
+
+def _is_retryable_provider_error(message: str) -> bool:
+    text = str(message).strip().lower()
+    if not text:
+        return False
+    retry_tokens = (
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "rate limit",
+        "429",
+        "502",
+        "503",
+        "504",
+    )
+    return any(token in text for token in retry_tokens)
 
 
 def _extract_required_tools_from_plan(plan: dict) -> list[str]:
@@ -224,13 +247,21 @@ def _extract_required_tools_from_plan(plan: dict) -> list[str]:
 def _build_planner_prompt(user_intent: str) -> str:
     """Build strict planner prompt that must return planner.v1 JSON only."""
     return (
-        "You are a planning engine.\n"
+        "You are a browser automation planning engine.\n"
         "Return strict JSON only with exact schema:\n"
         "{"
         "\"planner_schema_version\":\"planner.v1\","
         "\"intent\":\"...\","
-        "\"proposed_actions\":[{\"action\":\"...\",\"target\":\"...\",\"input\":\"...\"}]"
+        "\"proposed_actions\":["
+        "{\"action\":\"navigate\",\"target\":\"<url>\",\"input\":\"\"},"
+        "{\"action\":\"click\",\"target\":\"<css_selector>\",\"input\":\"\"},"
+        "{\"action\":\"type\",\"target\":\"<css_selector>\",\"input\":\"<text>\"},"
+        "{\"action\":\"wait_for_url\",\"target\":\"<url>\",\"input\":\"\"},"
+        "{\"action\":\"get_text\",\"target\":\"<css_selector>\",\"input\":\"\"},"
+        "{\"action\":\"get_title\",\"target\":\"\",\"input\":\"\"}"
+        "]"
         "}\n"
+        "Supported actions: navigate, click, type, wait_for_url, get_text, get_title.\n"
         "No markdown. No extra keys. No commentary.\n"
         f"User request: {user_intent.strip()}"
     )
@@ -820,14 +851,31 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider
         if not usable:
             attempts.append({"provider": provider, "status": "skipped", "reason": reason})
             continue
-        try:
-            raw_output = _generate_plan_raw_with_provider(provider, intent, model_name=model_name)
-            selected_provider = provider
-            attempts.append({"provider": provider, "status": "ok"})
+        retries_left = PROVIDER_MAX_RETRIES
+        while True:
+            try:
+                raw_output = _generate_plan_raw_with_provider(provider, intent, model_name=model_name)
+                selected_provider = provider
+                attempts.append({"provider": provider, "status": "ok"})
+                break
+            except ValueError as exc:
+                reason_text = str(exc)
+                if retries_left > 0 and _is_retryable_provider_error(reason_text):
+                    attempts.append(
+                        {
+                            "provider": provider,
+                            "status": "retrying",
+                            "reason": reason_text,
+                            "retries_left": str(retries_left),
+                        }
+                    )
+                    retries_left -= 1
+                    time.sleep(PROVIDER_RETRY_BACKOFF_SECONDS)
+                    continue
+                attempts.append({"provider": provider, "status": "failed", "reason": reason_text})
+                break
+        if raw_output:
             break
-        except ValueError as exc:
-            attempts.append({"provider": provider, "status": "failed", "reason": str(exc)})
-            continue
     if not raw_output:
         last_error = attempts[-1]["reason"] if attempts else "unknown"
         return {
@@ -919,14 +967,31 @@ def _build_assistant_response(prompt: str, agent_id: str, model_name: str, provi
         if not usable:
             attempts.append({"provider": provider, "status": "skipped", "reason": reason})
             continue
-        try:
-            output_text = _generate_chat_raw_with_provider(provider, prompt, model_name=model_name).strip()
-            selected_provider = provider
-            attempts.append({"provider": provider, "status": "ok"})
+        retries_left = PROVIDER_MAX_RETRIES
+        while True:
+            try:
+                output_text = _generate_chat_raw_with_provider(provider, prompt, model_name=model_name).strip()
+                selected_provider = provider
+                attempts.append({"provider": provider, "status": "ok"})
+                break
+            except ValueError as exc:
+                reason_text = str(exc)
+                if retries_left > 0 and _is_retryable_provider_error(reason_text):
+                    attempts.append(
+                        {
+                            "provider": provider,
+                            "status": "retrying",
+                            "reason": reason_text,
+                            "retries_left": str(retries_left),
+                        }
+                    )
+                    retries_left -= 1
+                    time.sleep(PROVIDER_RETRY_BACKOFF_SECONDS)
+                    continue
+                attempts.append({"provider": provider, "status": "failed", "reason": reason_text})
+                break
+        if output_text:
             break
-        except ValueError as exc:
-            attempts.append({"provider": provider, "status": "failed", "reason": str(exc)})
-            continue
     if not output_text:
         last_error = attempts[-1]["reason"] if attempts else "unknown"
         return {
