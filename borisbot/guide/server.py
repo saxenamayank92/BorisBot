@@ -3788,11 +3788,12 @@ def _render_html(workflows: list[str]) -> str:
           const completed = !!step.completed;
           const klass = completed ? 'ok' : 'warn';
           const buttonLabel = completed ? 'Mark Pending' : 'Mark Done';
+          const stepIdEncoded = encodeURIComponent(String(step.step_id || ''));
           return `<div class="wizard-item onboarding-item ${{klass}}">
             <strong>${{step.label || step.step_id}}</strong><br/>
             <span style="color:var(--muted);">${{completed ? 'Completed' : 'Pending'}}</span>
             <div class="mini-actions">
-              <button class="secondary" onclick="setWizardStep('${{String(step.step_id || '').replace(/'/g, \"\\\\'\")}}', ${{completed ? 'false' : 'true'}})">${{buttonLabel}}</button>
+              <button class="secondary" onclick="setWizardStepFromEncoded('${{stepIdEncoded}}', ${{completed ? 'false' : 'true'}})">${{buttonLabel}}</button>
             </div>
           </div>`;
         }}).join('');
@@ -3816,6 +3817,11 @@ def _render_html(workflows: list[str]) -> str:
       await refreshWizardState();
     }}
 
+    function setWizardStepFromEncoded(stepIdEncoded, completed) {{
+      const stepId = decodeURIComponent(String(stepIdEncoded || ''));
+      return setWizardStep(stepId, completed);
+    }}
+
     async function refreshInbox() {{
       try {{
         const response = await fetch('/api/task-inbox');
@@ -3824,12 +3830,12 @@ def _render_html(workflows: list[str]) -> str:
         const items = Array.isArray(data.items) ? data.items : [];
         const html = items.map(item => {{
           const intent = String(item.intent || '');
-          const safeIntent = intent.replace(/'/g, "\\\\'").replace(/\\n/g, ' ');
+          const safeIntent = encodeURIComponent(intent);
           return `<div class="inbox-item">
             <strong>${{item.item_id}}</strong> [${{item.priority}} | ${{item.status}}]<br/>
             <span style="color:var(--muted);">${{intent}}</span>
             <div class="mini-actions">
-              <button onclick="useInboxItemAsPrompt('${{safeIntent}}')">Use As Prompt</button>
+              <button onclick="useInboxItemAsPromptEncoded('${{safeIntent}}')">Use As Prompt</button>
               <button class="secondary" onclick="updateInboxItem('${{item.item_id}}', 'in_progress')">In Progress</button>
               <button class="secondary" onclick="updateInboxItem('${{item.item_id}}', 'done')">Done</button>
               <button class="secondary" onclick="deleteInboxItem('${{item.item_id}}')">Delete</button>
@@ -3845,6 +3851,11 @@ def _render_html(workflows: list[str]) -> str:
     function useInboxItemAsPrompt(intent) {{
       document.getElementById('prompt').value = intent || '';
       document.getElementById('meta').textContent = 'Planner prompt loaded from inbox item.';
+    }}
+
+    function useInboxItemAsPromptEncoded(intentEncoded) {{
+      const intent = decodeURIComponent(String(intentEncoded || ''));
+      useInboxItemAsPrompt(intent);
     }}
 
     async function addInboxItem() {{
