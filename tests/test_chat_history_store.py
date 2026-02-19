@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from borisbot.guide.chat_history_store import (
@@ -59,6 +60,13 @@ class ChatHistoryStoreTests(unittest.TestCase):
                 self.assertEqual(remaining[0]["role"], "user")
             finally:
                 mod.CHAT_HISTORY_DIR = original
+
+    def test_workspace_scoped_history_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict("os.environ", {"BORISBOT_WORKSPACE": tmpdir}, clear=False):
+                append_chat_message("agent-a", "user", "hello")
+                path = Path(tmpdir) / ".borisbot" / "chat_history" / "agent-a.json"
+                self.assertTrue(path.exists())
 
 
 if __name__ == "__main__":

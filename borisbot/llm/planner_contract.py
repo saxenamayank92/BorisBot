@@ -7,6 +7,11 @@ from typing import Any
 
 from borisbot.llm.errors import LLMInvalidOutputError
 
+try:
+    from json_repair import repair_json as _repair_json_fn
+except Exception:  # pragma: no cover - dependency optional at runtime
+    _repair_json_fn = None
+
 PLANNER_SCHEMA_VERSION = "planner.v1"
 ALLOWED_TOP_LEVEL_FIELDS = {"planner_schema_version", "intent", "proposed_actions"}
 ALLOWED_ACTION_FIELDS = {"action", "target", "input"}
@@ -79,20 +84,31 @@ def validate_planner_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_planner_output(raw_text: str) -> dict[str, Any]:
-    """Parse planner output with one bounded repair attempt only."""
+    """Parse planner output with bounded repair attempts."""
     if not isinstance(raw_text, str) or not raw_text.strip():
         raise LLMInvalidOutputError("planner output empty")
 
     try:
         payload = json.loads(raw_text)
     except Exception:
-        repaired = _single_repair_pass(raw_text)
+        repaired = ""
         try:
+            repaired = _single_repair_pass(raw_text)
             payload = json.loads(repaired)
-        except Exception as exc:
-            raise LLMInvalidOutputError("planner output invalid after one repair pass") from exc
+        except Exception:
+            if _repair_json_fn is None:
+                raise LLMInvalidOutputError("planner output invalid after one repair pass")
+            try:
+                repaired_payload = _repair_json_fn(raw_text)
+                if isinstance(repaired_payload, (dict, list)):
+                    payload = repaired_payload
+                elif isinstance(repaired_payload, str):
+                    payload = json.loads(repaired_payload)
+                else:
+                    raise LLMInvalidOutputError("planner output invalid after json_repair")
+            except Exception as repair_exc:
+                raise LLMInvalidOutputError("planner output invalid after one repair pass") from repair_exc
 
     if not isinstance(payload, dict):
         raise LLMInvalidOutputError("planner output must be object")
     return validate_planner_payload(payload)
-

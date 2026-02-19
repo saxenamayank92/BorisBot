@@ -2511,6 +2511,7 @@ def _enforce_execute_permissions(agent_id: str, preview: dict, approve_permissio
 
 
 def run_guide_server(workspace: Path, host: str = "127.0.0.1", port: int = 7788, open_browser: bool = True) -> None:
+    os.environ["BORISBOT_WORKSPACE"] = str(workspace.resolve())
     state = GuideState(workspace, python_bin=sys.executable)
     
     # Start background scheduler
@@ -2653,4 +2654,3 @@ class ActionRunner(threading.Thread):
 
 if __name__ == "__main__":
     run_guide_server(Path.cwd())
-

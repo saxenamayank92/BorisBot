@@ -1,8 +1,10 @@
 """Tests for strict planner.v1 contract parsing and repair limits."""
 
 import unittest
+from unittest import mock
 
 from borisbot.llm.errors import LLMInvalidOutputError
+from borisbot.llm import planner_contract
 from borisbot.llm.planner_contract import parse_planner_output
 
 
@@ -41,7 +43,17 @@ class PlannerContractTests(unittest.TestCase):
         with self.assertRaises(LLMInvalidOutputError):
             parse_planner_output(raw)
 
+    def test_json_repair_fallback_used_when_available(self) -> None:
+        raw = "not-quite-json"
+        repaired = {
+            "planner_schema_version": "planner.v1",
+            "intent": "x",
+            "proposed_actions": [],
+        }
+        with mock.patch.object(planner_contract, "_repair_json_fn", return_value=repaired):
+            parsed = parse_planner_output(raw)
+        self.assertEqual(parsed["intent"], "x")
+
 
 if __name__ == "__main__":
     unittest.main()
-

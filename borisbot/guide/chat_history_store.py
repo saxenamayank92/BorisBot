@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -16,7 +17,12 @@ def _agent_key(agent_id: str) -> str:
 
 
 def _history_path(agent_id: str) -> Path:
-    return CHAT_HISTORY_DIR / f"{_agent_key(agent_id)}.json"
+    workspace = str(os.getenv("BORISBOT_WORKSPACE", "")).strip()
+    if workspace:
+        root = Path(workspace) / ".borisbot" / "chat_history"
+    else:
+        root = CHAT_HISTORY_DIR
+    return root / f"{_agent_key(agent_id)}.json"
 
 
 def load_chat_history(agent_id: str) -> list[dict[str, str]]:

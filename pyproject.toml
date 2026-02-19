@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2.5.0",
     "python-multipart>=0.0.12",
     "platformdirs>=4.3.8",
+    "json-repair>=0.39.1",
 ]
 requires-python = ">=3.11"
 readme = "README.md"
