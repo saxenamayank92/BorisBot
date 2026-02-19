@@ -2551,6 +2551,12 @@ def _render_html(workflows: list[str]) -> str:
         <input id="start" value="https://example.com" />
         <label for="model">Ollama model</label>
         <input id="model" value="llama3.2:3b" />
+        <label for="recommended_model">Recommended model preset</label>
+        <select id="recommended_model" onchange="applyRecommendedModel()">
+          <option value="llama3.2:3b">Balanced: llama3.2:3b</option>
+          <option value="qwen2.5:3b">Fast: qwen2.5:3b</option>
+          <option value="mistral:7b">Higher quality: mistral:7b</option>
+        </select>
         <label for="budget_system_daily">System daily budget (USD)</label>
         <input id="budget_system_daily" value="" placeholder="e.g. 10" />
         <label for="budget_agent_daily">Agent daily budget (USD)</label>
@@ -2760,6 +2766,28 @@ def _render_html(workflows: list[str]) -> str:
     let chatHistory = [];
     let assistantHistory = [];
     const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
+    const recommendedModels = ['llama3.2:3b', 'qwen2.5:3b', 'mistral:7b'];
+
+    function applyRecommendedModel() {{
+      const preset = document.getElementById('recommended_model');
+      const modelInput = document.getElementById('model');
+      if (!preset || !modelInput) return;
+      const value = (preset.value || '').trim();
+      if (!value) return;
+      modelInput.value = value;
+      showOllamaSetupPlan();
+      refreshCostEstimator();
+    }}
+
+    function syncRecommendedModelFromInput() {{
+      const preset = document.getElementById('recommended_model');
+      const modelInput = document.getElementById('model');
+      if (!preset || !modelInput) return;
+      const value = (modelInput.value || '').trim();
+      if (recommendedModels.includes(value)) {{
+        preset.value = value;
+      }}
+    }}
 
     function currentParams() {{
       return {{
@@ -3933,6 +3961,7 @@ def _render_html(workflows: list[str]) -> str:
 
     setViewMode('split');
     loadProfile();
+    syncRecommendedModelFromInput();
     showOllamaSetupPlan();
     refreshPermissions();
     refreshRuntimeStatus();
@@ -3945,6 +3974,11 @@ def _render_html(workflows: list[str]) -> str:
     document.getElementById('prompt').addEventListener('input', refreshCostEstimator);
     document.getElementById('assistant-input').addEventListener('input', refreshCostEstimator);
     document.getElementById('primary_provider').addEventListener('input', refreshCostEstimator);
+    document.getElementById('model').addEventListener('input', () => {{
+      syncRecommendedModelFromInput();
+      showOllamaSetupPlan();
+      refreshCostEstimator();
+    }});
     setInterval(refreshRuntimeStatus, 5000);
     setInterval(refreshWizardState, 15000);
     setInterval(refreshInbox, 15000);

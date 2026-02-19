@@ -772,6 +772,8 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertIn("addInboxItem()", html)
         self.assertIn("Scheduler", html)
         self.assertIn("createSchedule()", html)
+        self.assertIn("recommended_model", html)
+        self.assertIn("applyRecommendedModel()", html)
 
     def test_collect_runtime_status_includes_provider_matrix(self) -> None:
         with mock.patch("borisbot.guide.server.load_profile", return_value={"primary_provider": "ollama", "model_name": "llama3.2:3b", "provider_settings": {}}), mock.patch(

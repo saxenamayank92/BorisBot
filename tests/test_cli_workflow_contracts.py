@@ -707,6 +707,26 @@ class CliWorkflowContractTests(unittest.TestCase):
             self.assertEqual(payload["model"], "llama3.2:3b")
             self.assertEqual(len(payload["steps"]), 2)
 
+    def test_llm_setup_self_heal_retry_on_pull_failure(self) -> None:
+        with mock.patch("borisbot.cli.shutil.which", return_value="/usr/bin/ollama"), mock.patch(
+            "borisbot.cli._resolve_ollama_start_command",
+            return_value=["ollama", "serve"],
+        ), mock.patch(
+            "borisbot.cli._run_setup_command",
+            side_effect=[
+                (0, "started"),
+                (1, "pull failed"),
+                (0, "restarted"),
+                (0, "pull success"),
+            ],
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                llm_setup(model_name="llama3.2:3b", auto_install=True, json_output=True)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertTrue(payload.get("self_heal_recovered"))
+
     def test_llm_setup_json_fail_payload(self) -> None:
         with mock.patch("borisbot.cli.shutil.which", return_value=None):
             output = io.StringIO()

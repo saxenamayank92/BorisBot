@@ -600,13 +600,30 @@ def llm_setup(
     pull_rc, pull_output = _run_setup_command(pull_cmd)
     _add_step("pull", pull_cmd, "completed" if pull_rc == 0 else "failed", pull_output)
     if pull_rc != 0:
-        payload["error"] = "PULL_FAILED"
-        if not json_output:
-            typer.echo("LLM SETUP: FAIL")
-            typer.echo("  step: pull")
-            typer.echo(f"  command: {' '.join(pull_cmd)}")
-            typer.echo(f"  output: {pull_output or 'no output'}")
-        _fail(1)
+        # One self-heal pass: restart ollama runtime and retry pull once.
+        retry_start_rc, retry_start_output = _run_setup_command(start_cmd)
+        _add_step(
+            "pull_retry_start",
+            start_cmd,
+            "completed" if retry_start_rc == 0 else "failed",
+            retry_start_output,
+        )
+        retry_pull_rc, retry_pull_output = _run_setup_command(pull_cmd)
+        _add_step(
+            "pull_retry",
+            pull_cmd,
+            "completed" if retry_pull_rc == 0 else "failed",
+            retry_pull_output,
+        )
+        if retry_pull_rc != 0:
+            payload["error"] = "PULL_FAILED"
+            if not json_output:
+                typer.echo("LLM SETUP: FAIL")
+                typer.echo("  step: pull")
+                typer.echo(f"  command: {' '.join(pull_cmd)}")
+                typer.echo(f"  output: {retry_pull_output or pull_output or 'no output'}")
+            _fail(1)
+        payload["self_heal_recovered"] = True
 
     payload["status"] = "ok"
     if json_output:
