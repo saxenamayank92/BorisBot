@@ -21,7 +21,16 @@ const API = {
 
 const Wizard = {
     currentStep: 1,
-    totalSteps: 4,
+    totalSteps: 7,
+    pageMeta: {
+        1: { title: 'System Readiness', desc: 'Check local prerequisites before setup.' },
+        2: { title: 'Ollama Runtime', desc: 'Install and start the local model runtime.' },
+        3: { title: 'Model Selection', desc: 'Choose and pull one local model.' },
+        4: { title: 'Cloud Fallback (Optional)', desc: 'Add API keys only if you want cloud fallback.' },
+        5: { title: 'Planner Verification', desc: 'Run a quick verification task.' },
+        6: { title: 'Permission Policy', desc: 'Choose default execution safety settings.' },
+        7: { title: 'Finish Setup', desc: 'Apply policy and open dashboard.' }
+    },
 
     async init() {
         try {
@@ -93,6 +102,12 @@ const Wizard = {
         document.querySelectorAll('.wizard-step').forEach(el => el.classList.add('hidden'));
         document.getElementById(`step-${step}`).classList.remove('hidden');
 
+        const header = this.pageMeta[step] || {};
+        const title = document.getElementById('step-title');
+        const desc = document.getElementById('step-desc');
+        if (title) title.textContent = header.title || 'BorisBot Setup';
+        if (desc) desc.textContent = header.desc || '';
+
         // Update dots
         document.querySelectorAll('.step-dot').forEach(el => {
             const dotStep = parseInt(el.dataset.step);
@@ -102,7 +117,12 @@ const Wizard = {
         });
 
         // Dynamic checks
-        if (step === 2) this.checkProviderStatus();
+        if (step === 2 || step === 3) {
+            this.checkProviderStatus();
+        }
+        if (step === 3) {
+            this.loadRecommendedModels();
+        }
     },
 
     // Step 1: System Checks
@@ -202,7 +222,8 @@ const Wizard = {
                     btn.className = "btn-secondary btn-small";
                     setTimeout(() => progressContainer.classList.add('hidden'), 1000);
                     // Enable next
-                    document.getElementById('btn-step-2-next').disabled = false;
+                    const modelNext = document.getElementById('btn-step-3-next');
+                    if (modelNext) modelNext.disabled = false;
                 } else if (job.status === 'failed') {
                     clearInterval(poll);
                     btn.textContent = "Retry";
@@ -229,12 +250,12 @@ const Wizard = {
             const el = document.getElementById('ollama-connection-status');
             if (status.running) {
                 el.innerHTML = `<span style="color:#137333">● Ollama is running</span>`;
-                if (status.model) {
-                    document.getElementById('btn-step-2-next').disabled = false;
-                    document.getElementById('btn-step-2-next').onclick = () => this.next();
-                }
             } else {
                 el.innerHTML = `<span style="color:#c5221f">● Ollama disconnected</span>`;
+            }
+            const modelNext = document.getElementById('btn-step-3-next');
+            if (modelNext) {
+                modelNext.disabled = !(status.running && status.model);
             }
         } catch (e) { }
     },
@@ -285,7 +306,7 @@ const Wizard = {
                 log.scrollTop = log.scrollHeight;
                 if (job.status === 'completed') {
                     clearInterval(poll);
-                    document.getElementById('btn-step-3-next').classList.remove('hidden');
+                    document.getElementById('btn-step-5-next').classList.remove('hidden');
                 }
             }, 1000);
         } catch (e) {

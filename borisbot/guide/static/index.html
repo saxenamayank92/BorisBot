@@ -35,6 +35,9 @@
                 <div class="step-dot" data-step="2"></div>
                 <div class="step-dot" data-step="3"></div>
                 <div class="step-dot" data-step="4"></div>
+                <div class="step-dot" data-step="5"></div>
+                <div class="step-dot" data-step="6"></div>
+                <div class="step-dot" data-step="7"></div>
             </div>
 
             <!-- Step 1: System -->
@@ -49,78 +52,96 @@
                 </div>
             </div>
 
-            <!-- Step 2: Intelligence -->
+            <!-- Step 2: Ollama Setup -->
             <div id="step-2" class="wizard-step hidden">
                 <div class="card">
                     <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                         <div>
-                            <h2>Choose your Intelligence</h2>
-                            <p>Select a local model to power your agents.</p>
+                            <h2>Install and Start Ollama</h2>
+                            <p>Run local model runtime setup from inside this page.</p>
                         </div>
                         <div id="ollama-connection-status" style="font-size:13px; font-weight:500;">
                             Checking Ollama...
                         </div>
                     </div>
-
-                    <div id="model-grid" class="model-grid">
-                        <!-- injected by js -->
-                    </div>
                     <div class="card" style="margin-top:16px; background:#f8fafc;">
-                        <h2 style="font-size:20px;">Ollama Setup</h2>
-                        <p>Install and start Ollama from the wizard if it is not already available.</p>
+                        <h2 style="font-size:20px;">One-Touch Local Setup</h2>
+                        <p>Use these buttons in order: install, then start, then refresh status.</p>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
                             <button class="btn-secondary btn-small" onclick="Wizard.runOllamaAction('ollama_install')">Install Ollama</button>
                             <button class="btn-secondary btn-small" onclick="Wizard.runOllamaAction('ollama_start')">Start Ollama</button>
                             <button class="btn-secondary btn-small" onclick="Wizard.checkProviderStatus()">Refresh Status</button>
                         </div>
-                        <pre id="ollama-setup-log" class="terminal" style="height:140px;margin-top:10px;">No setup actions yet.</pre>
-                    </div>
-
-                    <div style="margin-top:40px; border-top:1px solid #f1f3f4; padding-top:32px;">
-                        <h2>Or use Cloud APIs</h2>
-                        <p>Optional: Add keys for fallback or superior reasoning.</p>
-                        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:24px;">
-                            <div class="input-group">
-                                <label>OpenAI API Key</label>
-                                <input type="password" placeholder="sk-..." id="key-openai">
-                            </div>
-                            <div class="input-group">
-                                <label>Anthropic API Key</label>
-                                <input type="password" placeholder="sk-ant-..." id="key-anthropic">
-                            </div>
-                        </div>
-                        <div style="text-align:right;">
-                            <button class="btn-secondary btn-small" onclick="Wizard.saveCloudKeys()">Save
-                                Keys</button>
-                        </div>
+                        <pre id="ollama-setup-log" class="terminal" style="height:180px;margin-top:10px;">No setup actions yet.</pre>
                     </div>
 
                     <div style="margin-top:24px; text-align:right; display:flex; justify-content:space-between;">
                         <button onclick="Wizard.prev()" class="btn-text">Back</button>
-                        <button id="btn-step-2-next" class="btn" disabled>Continue</button>
+                        <button id="btn-step-2-next" class="btn" onclick="Wizard.next()">Continue</button>
                     </div>
                 </div>
             </div>
 
-            <!-- Step 3: Verification -->
+            <!-- Step 3: Model Pull -->
             <div id="step-3" class="wizard-step hidden">
                 <div class="card">
+                    <h2>Choose and Pull a Model</h2>
+                    <p>Pick one local model and click Get. Continue unlocks after model availability is detected.</p>
+                    <div id="model-grid" class="model-grid">
+                        <!-- injected by js -->
+                    </div>
+                    <div style="margin-top:24px; text-align:right; display:flex; justify-content:space-between;">
+                        <button onclick="Wizard.prev()" class="btn-text">Back</button>
+                        <button id="btn-step-3-next" class="btn" onclick="Wizard.next()" disabled>Continue</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 4: Cloud Keys -->
+            <div id="step-4" class="wizard-step hidden">
+                <div class="card">
+                    <h2>Optional Cloud API Keys</h2>
+                    <p>Add provider keys only if you want cloud fallback. You can skip this page.</p>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:24px;">
+                        <div class="input-group">
+                            <label>OpenAI API Key</label>
+                            <input type="password" placeholder="sk-..." id="key-openai">
+                        </div>
+                        <div class="input-group">
+                            <label>Anthropic API Key</label>
+                            <input type="password" placeholder="sk-ant-..." id="key-anthropic">
+                        </div>
+                    </div>
+                    <div style="text-align:right;">
+                        <button class="btn-secondary btn-small" onclick="Wizard.saveCloudKeys()">Save Keys</button>
+                    </div>
+
+                    <div style="margin-top:24px; text-align:right; display:flex; justify-content:space-between;">
+                        <button onclick="Wizard.prev()" class="btn-text">Back</button>
+                        <button class="btn" onclick="Wizard.next()">Continue</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 5: Verification -->
+            <div id="step-5" class="wizard-step hidden">
+                <div class="card">
                     <h2>Verify Agent Logic</h2>
-                    <p>We'll run a "Hello World" task to ensure the planner is working.</p>
+                    <p>Run a quick planner check before enabling dashboard.</p>
                     <div class="terminal" id="verification-log">Waiting to start...</div>
                     <div style="margin-top:24px; text-align:right; display:flex; justify-content:space-between;">
                         <button onclick="Wizard.prev()" class="btn-text">Back</button>
                         <div>
                             <button onclick="Wizard.saveVerifyAgent()" class="btn-secondary"
                                 style="margin-right:12px;">Run Verification</button>
-                            <button id="btn-step-3-next" class="btn hidden" onclick="Wizard.next()">Continue</button>
+                            <button id="btn-step-5-next" class="btn hidden" onclick="Wizard.next()">Continue</button>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Step 4: Permissions -->
-            <div id="step-4" class="wizard-step hidden">
+            <!-- Step 6: Permissions -->
+            <div id="step-6" class="wizard-step hidden">
                 <div class="card">
                     <h2>Safety & Permissions</h2>
                     <p>Select a default policy for your agents.</p>
@@ -146,7 +167,20 @@
 
                     <div style="margin-top:24px; text-align:right; display:flex; justify-content:space-between;">
                         <button onclick="Wizard.prev()" class="btn-text">Back</button>
-                        <button onclick="Wizard.applyPolicyAndFinish()" class="btn">Finish Setup</button>
+                        <button onclick="Wizard.next()" class="btn">Continue</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 7: Finish -->
+            <div id="step-7" class="wizard-step hidden">
+                <div class="card">
+                    <h2>Setup Complete</h2>
+                    <p>Apply your policy and enter the dashboard.</p>
+                    <div class="terminal">You can change model, policies, and providers later from Settings.</div>
+                    <div style="margin-top:24px; text-align:right; display:flex; justify-content:space-between;">
+                        <button onclick="Wizard.prev()" class="btn-text">Back</button>
+                        <button onclick="Wizard.applyPolicyAndFinish()" class="btn">Open Dashboard</button>
                     </div>
                 </div>
             </div>
