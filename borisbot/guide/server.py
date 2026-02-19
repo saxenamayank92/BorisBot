@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlsplit
 
 import httpx
@@ -44,6 +45,7 @@ from borisbot.supervisor.provider_secrets import (
     set_provider_secret,
 )
 from borisbot.supervisor.tool_permissions import (
+    ALLOWED_DECISIONS,
     ALLOWED_TOOLS,
     DECISION_ALLOW,
     DECISION_DENY,
@@ -161,6 +163,7 @@ ACTION_TOOL_MAP = {
     "policy_web_readonly": TOOL_SHELL,
     "policy_automation": TOOL_SHELL,
     "policy_apply": TOOL_SHELL,
+    "verify_agent_logic": TOOL_SHELL,
 }
 
 
@@ -826,12 +829,13 @@ def _build_dry_run_preview(intent: str, agent_id: str, model_name: str, provider
             attempts.append({"provider": provider, "status": "failed", "reason": str(exc)})
             continue
     if not raw_output:
+        last_error = attempts[-1]["reason"] if attempts else "unknown"
         return {
             "status": "failed",
             "error_class": "llm_provider",
             "error_code": "LLM_PROVIDER_UNHEALTHY",
-            "message": "No usable provider available for planner dry-run.",
-            "provider_attempts": attempts,
+            "message": f"Planning failed: {last_error}",
+            "attempts": attempts,
             "provider_chain": provider_chain,
             "budget": budget_status,
         }
@@ -924,11 +928,12 @@ def _build_assistant_response(prompt: str, agent_id: str, model_name: str, provi
             attempts.append({"provider": provider, "status": "failed", "reason": str(exc)})
             continue
     if not output_text:
+        last_error = attempts[-1]["reason"] if attempts else "unknown"
         return {
             "status": "failed",
             "error_class": "llm_provider",
             "error_code": "LLM_PROVIDER_UNHEALTHY",
-            "message": "No usable provider available for assistant chat.",
+            "message": f"Chat failed: {last_error}",
             "provider_attempts": attempts,
             "provider_chain": provider_chain,
             "budget": budget_status,
@@ -1138,6 +1143,8 @@ def build_action_command(
             "--json",
         ]
     if action == "verify":
+        return [python_bin, "-m", "borisbot.cli", "verify"]
+    if action == "verify_agent_logic":
         return [python_bin, "-m", "borisbot.cli", "verify"]
     if action == "analyze":
         return [python_bin, "-m", "borisbot.cli", "analyze-workflow", workflow_path]
@@ -1354,8 +1361,8 @@ class GuideState:
     def update_inbox_item(self, item_id: str, status: str) -> dict:
         key = str(item_id).strip()
         value = str(status).strip().lower()
-        if value not in {"open", "in_progress", "done", "archived"}:
-            raise ValueError("status must be one of: open, in_progress, done, archived")
+        if value not in {"open", "in_progress", "done", "archived", "failed"}:
+            raise ValueError("status must be one of: open, in_progress, done, archived, failed")
         with self._lock:
             for item in self._inbox_items:
                 if str(item.get("item_id", "")) == key:
@@ -1411,6 +1418,14 @@ class GuideState:
             before = len(self._schedules)
             self._schedules = [row for row in self._schedules if str(row.get("schedule_id", "")) != key]
             return len(self._schedules) < before
+
+    def get_next_pending_item(self) -> dict | None:
+        """Return the next 'open' inbox item (manual source only for now)."""
+        with self._lock:
+            for item in self._inbox_items:
+                if item.get("status") == "open":
+                    return item
+        return None
 
     def tick_schedules(self) -> int:
         now = datetime.utcnow()
@@ -1678,6 +1693,31 @@ def _build_support_bundle(state: GuideState, agent_id: str) -> dict:
     }
 
 
+def _collect_runtime_status(python_bin: str) -> dict:
+    """Collect runtime diagnostic information."""
+    return {
+        "python": {
+            "version": sys.version.split()[0],
+            "executable": python_bin,
+        },
+        "docker": {
+            "installed": shutil.which("docker") is not None,
+            "running": False,  # We don't check for speed unless needed
+        },
+        "ollama": {
+            "installed": shutil.which("ollama") is not None,
+            "running": False,  # We don't check for speed unless needed
+        },
+        "log_dir": str(Path.home() / ".borisbot" / "logs"),
+        "provider_matrix": {
+            "ollama": {
+                "installed": shutil.which("ollama") is not None,
+                "running": False,
+            }
+        }
+    }
+
+
 def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
     class GuideHandler(BaseHTTPRequestHandler):
         def _json_response(self, payload: dict, status: int = HTTPStatus.OK) -> None:
@@ -1697,15 +1737,137 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 return {}
             return data if isinstance(data, dict) else {}
 
+        def _serve_static(self, path: str, content_type: str) -> None:
+            """Serve a static file from the static directory."""
+            try:
+                # Security check: ensure path stays within static dir
+                base_path = Path(__file__).parent / "static"
+                file_path = (base_path / path).resolve()
+                if not str(file_path).startswith(str(base_path)):
+                    self._json_response({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+                    return
+                
+                if not file_path.exists():
+                    self._json_response({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+
+                content = file_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/":
-                page = _render_html(state.workflows()).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(page)))
-                self.end_headers()
-                self.wfile.write(page)
+                self._serve_static("index.html", "text/html; charset=utf-8")
                 return
+            if self.path.startswith("/static/"):
+                # primitive static file server
+                rel_path = self.path.replace("/static/", "", 1)
+                if rel_path.endswith(".css"):
+                    self._serve_static(rel_path, "text/css")
+                    return
+                if rel_path.endswith(".js"):
+                    self._serve_static(rel_path, "application/javascript")
+                    return
+                # fallback
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            # API: System Check
+            if self.path == "/api/system-check":
+                checks = []
+                # Check 1: Python version
+                checks.append({
+                    "label": "Python Environment",
+                    "passed": sys.version_info >= (3, 10),
+                    "message": f"Python {sys.version.split()[0]} detected"
+                })
+                # Check 2: Docker (optional but good)
+                docker_path = shutil.which("docker")
+                checks.append({
+                    "label": "Docker Engine",
+                    "passed": bool(docker_path),
+                    "message": "Docker available" if docker_path else "Docker not found (agents will run locally only)"
+                })
+                # Check 3: Directories
+                log_dir = Path.home() / ".borisbot" / "logs"
+                try:
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    checks.append({ "label": "Write Permissions", "passed": True, "message": "Log directory writable" })
+                except Exception as e:
+                    checks.append({ "label": "Write Permissions", "passed": False, "message": f"Failed to write logs: {e}" })
+
+                self._json_response({"items": checks})
+                return
+
+            # API: Provider Status (Granular)
+            if self.path.startswith("/api/provider-status/"):
+                provider = self.path.split("/")[-1]
+                if provider == "ollama":
+                    running = False
+                    model = ""
+                    installed = bool(shutil.which("ollama"))
+                    if installed:
+                        try:
+                            # Try to hit localhost:11434
+                            res = httpx.get("http://127.0.0.1:11434/api/tags", timeout=1.0)
+                            if res.status_code == 200:
+                                running = True
+                                models = res.json().get('models', [])
+                                if models:
+                                    model = models[0].get('name', 'unknown')
+                        except Exception:
+                            pass
+                    
+                    self._json_response({
+                        "installed": installed,
+                        "running": running,
+                        "model": model
+                    })
+                    return
+
+            # API: Recommended Models
+            if self.path == "/api/recommended-models":
+                self._json_response({
+                    "items": [
+                        {
+                            "id": "llama3.2",
+                            "name": "Llama 3.2",
+                            "size": "2.0GB",
+                            "description": "Meta's latest lightweight model. Balanced for speed and quality.",
+                            "recommended": True
+                        },
+                        {
+                            "id": "mistral",
+                            "name": "Mistral 7B",
+                            "size": "4.1GB",
+                            "description": "High performant 7B model. Good for complex reasoning.",
+                            "recommended": False
+                        },
+                        {
+                            "id": "qwen2.5:3b",
+                            "name": "Qwen 2.5 3B",
+                            "size": "1.9GB",
+                            "description": "Fast and capable model from Alibaba. Great for simple tasks.",
+                            "recommended": False
+                        },
+                         {
+                            "id": "deepseek-r1:1.5b",
+                            "name": "DeepSeek R1 1.5B",
+                            "size": "1.1GB",
+                            "description": "Extremely fast distilled model. Good for quick checks.",
+                            "recommended": False
+                        }
+                    ]
+                })
+                return
+
+
+
             if self.path == "/api/workflows":
                 self._json_response({"items": state.workflows()})
                 return
@@ -1774,7 +1936,25 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
                 return
             self._json_response({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
+
         def do_POST(self) -> None:  # noqa: N802
+            # API: Ollama Pull
+            if self.path == "/api/ollama/pull":
+                try:
+                    payload = self._read_json()
+                    model = payload.get("model_name") or payload.get("model")
+                    if not model:
+                        self._json_response({"error": "model_required"}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    
+                    # Create a job to pull the model
+                    job = state.create_job("ollama_pull", {"model_name": str(model)})
+                    self._json_response({"status": "pulling", "job_id": job.job_id}, status=HTTPStatus.ACCEPTED)
+                    return
+                except Exception as e:
+                    self._json_response({"error": str(e)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                    
             if self.path == "/api/run":
                 payload = self._read_json()
                 action = str(payload.get("action", "")).strip()
@@ -2219,2085 +2399,258 @@ def _make_handler(state: GuideState) -> Callable[..., BaseHTTPRequestHandler]:
     return GuideHandler
 
 
-def _render_html(workflows: list[str]) -> str:
-    options = "\n".join(
-        f'<option value="{wf}">{wf}</option>' for wf in workflows
-    ) or '<option value="workflows/real_login_test.json">workflows/real_login_test.json</option>'
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BorisBot Guide</title>
-  <style>
-    :root {{
-      --bg: #f2efe8;
-      --bg-alt: #ece6dc;
-      --panel: #fffaf0;
-      --panel-strong: #fffdf8;
-      --ink: #1f2a32;
-      --muted: #5a6770;
-      --brand: #0e6760;
-      --brand-2: #cb7448;
-      --accent: #9a7a58;
-      --border: #d9ccb7;
-      --line-soft: rgba(111, 89, 64, 0.16);
-      --shadow-soft: 0 18px 40px rgba(24, 33, 40, 0.08);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 12% 8%, #fffdf7 0%, transparent 40%),
-        radial-gradient(circle at 88% 0%, #efe7da 0%, transparent 36%),
-        linear-gradient(180deg, var(--bg) 0%, var(--bg-alt) 100%);
-      position: relative;
-    }}
-    body::before {{
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background:
-        linear-gradient(120deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0) 40%),
-        repeating-linear-gradient(
-          135deg,
-          rgba(154, 122, 88, 0.03) 0,
-          rgba(154, 122, 88, 0.03) 10px,
-          rgba(255, 255, 255, 0) 10px,
-          rgba(255, 255, 255, 0) 20px
-        );
-    }}
-    .wrap {{ max-width: 1240px; margin: 0 auto; padding: 28px 24px 36px; }}
-    .hero {{
-      border: 1px solid var(--line-soft);
-      border-radius: 18px;
-      padding: 18px 18px 16px;
-      background: linear-gradient(145deg, rgba(255, 250, 241, 0.86), rgba(255, 253, 249, 0.76));
-      backdrop-filter: blur(6px);
-      box-shadow: var(--shadow-soft);
-      margin-bottom: 14px;
-    }}
-    h1 {{
-      margin: 0 0 8px;
-      font-size: 34px;
-      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
-      letter-spacing: 0.01em;
-      line-height: 1.08;
-    }}
-    p {{ margin: 0; color: var(--muted); }}
-    .hero-meta {{
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px;
-      margin-top: 10px;
-    }}
-    .chip {{
-      border: 1px solid var(--line-soft);
-      border-radius: 999px;
-      padding: 6px 10px;
-      background: rgba(255, 255, 255, 0.64);
-      color: #40505a;
-      font-size: 12px;
-      letter-spacing: 0.02em;
-    }}
-    .mode-chip {{
-      border: 1px solid var(--line-soft);
-      border-radius: 999px;
-      padding: 5px 10px;
-      background: rgba(255, 255, 255, 0.76);
-      color: #3b4c57;
-      font-size: 12px;
-      cursor: pointer;
-    }}
-    .mode-chip.active {{
-      background: linear-gradient(135deg, #365564, #284652);
-      color: #fff;
-      border-color: rgba(40, 70, 82, 0.5);
-    }}
-    .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 16px; align-items: start; }}
-    .card {{
-      background: linear-gradient(180deg, var(--panel-strong) 0%, var(--panel) 100%);
-      border: 1px solid var(--line-soft);
-      border-radius: 18px;
-      padding: 16px;
-      box-shadow: var(--shadow-soft);
-      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
-    }}
-    .card:hover {{
-      transform: translateY(-1px);
-      box-shadow: 0 24px 44px rgba(24, 33, 40, 0.11);
-      border-color: rgba(124, 97, 67, 0.28);
-    }}
-    .step {{
-      margin-top: 12px;
-      padding: 12px;
-      border: 1px solid #e8dcc7;
-      border-radius: 14px;
-      background: linear-gradient(160deg, #fffefb 0%, #fff9ef 52%, #fff4e6 100%);
-      transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
-    }}
-    .step:hover {{
-      transform: translateY(-2px);
-      box-shadow: 0 16px 30px rgba(54, 85, 100, 0.13);
-      border-color: #c3b193;
-    }}
-    .step:first-child {{ margin-top: 0; }}
-    .step h3 {{ margin: 0 0 6px; font-size: 17px; letter-spacing: 0.02em; }}
-    .actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }}
-    button {{
-      border: 0;
-      border-radius: 10px;
-      padding: 9px 12px;
-      font-weight: 600;
-      cursor: pointer;
-      background: linear-gradient(135deg, var(--brand), #0c5650);
-      color: #fff;
-      transition: transform 140ms ease, filter 140ms ease, box-shadow 140ms ease;
-      box-shadow: 0 8px 14px rgba(14, 103, 96, 0.24);
-    }}
-    button:hover {{
-      transform: translateY(-1px);
-      filter: brightness(1.05);
-      box-shadow: 0 12px 20px rgba(14, 103, 96, 0.26);
-    }}
-    button.secondary {{
-      background: linear-gradient(135deg, var(--brand-2), #b16137);
-      box-shadow: 0 8px 14px rgba(203, 116, 72, 0.24);
-    }}
-    label {{ display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }}
-    input, select {{
-      width: 100%;
-      border: 1px solid #d8ccb7;
-      border-radius: 10px;
-      padding: 9px;
-      font-size: 14px;
-      background: rgba(255, 255, 255, 0.92);
-      color: var(--ink);
-      margin-bottom: 10px;
-    }}
-    input:focus, select:focus, textarea:focus {{
-      outline: none;
-      border-color: #b18a62;
-      box-shadow: 0 0 0 3px rgba(177, 138, 98, 0.15);
-    }}
-    pre {{
-      margin: 0;
-      background: linear-gradient(180deg, #101a21, #0f171d);
-      color: #dff6ec;
-      border-radius: 12px;
-      padding: 12px;
-      min-height: 300px;
-      max-height: 500px;
-      overflow: auto;
-      font-size: 12px;
-      white-space: pre-wrap;
-    }}
-    .viewer-toolbar {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 10px;
-    }}
-    .viewer-toolbar button {{
-      background: #365564;
-    }}
-    .viewer-toolbar button.mode {{
-      background: #5d7f8e;
-      box-shadow: 0 8px 14px rgba(93, 127, 142, 0.25);
-    }}
-    .viewer-toolbar button.mode.active {{
-      background: linear-gradient(135deg, #365564, #284652);
-      box-shadow: 0 10px 18px rgba(40, 70, 82, 0.33);
-      transform: translateY(-1px);
-    }}
-    .viewer-grid {{
-      display: grid;
-      gap: 10px;
-      height: 560px;
-    }}
-    .viewer-grid.mode-terminal {{ grid-template-rows: 1fr; }}
-    .viewer-grid.mode-browser {{ grid-template-rows: 1fr; }}
-    .viewer-grid.mode-split {{ grid-template-rows: 1fr 1fr; }}
-    .pane {{
-      min-height: 0;
-      border: 1px solid var(--line-soft);
-      border-radius: 12px;
-      overflow: hidden;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), #fbf7ef);
-      display: flex;
-      flex-direction: column;
-    }}
-    .pane-header {{
-      padding: 8px 10px;
-      font-size: 12px;
-      color: var(--muted);
-      border-bottom: 1px solid var(--line-soft);
-      background: linear-gradient(90deg, #fff7ea 0%, #fff3e2 100%);
-    }}
-    .pane-body {{
-      flex: 1;
-      min-height: 0;
-    }}
-    .pane.hidden {{ display: none; }}
-    iframe {{
-      border: 0;
-      width: 100%;
-      height: 100%;
-      background: #0f1519;
-    }}
-    .browser-link {{
-      font-size: 12px;
-      color: var(--brand);
-      margin-bottom: 8px;
-      display: block;
-      word-break: break-all;
-    }}
-    .hover-card {{
-      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
-    }}
-    .hover-card:hover {{
-      transform: translateY(-1px);
-      box-shadow: 0 10px 18px rgba(54, 85, 100, 0.16);
-      border-color: #89aeb9;
-    }}
-    .provider-cards {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 8px;
-    }}
-    .onboarding-list {{
-      display: grid;
-      gap: 6px;
-      margin-top: 8px;
-      font-size: 13px;
-    }}
-    .onboarding-item {{
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 8px;
-      background: #fffdf8;
-    }}
-    .onboarding-item.ok {{
-      border-color: #98c9b0;
-      background: #ecfaf2;
-    }}
-    .onboarding-item.warn {{
-      border-color: #deb185;
-      background: #fff2e6;
-    }}
-    .provider-card {{
-      border: 1px solid var(--line-soft);
-      border-radius: 10px;
-      padding: 8px;
-      background: linear-gradient(170deg, rgba(255,255,255,0.88), rgba(255,252,246,0.82));
-    }}
-    .advanced-step.hidden {{
-      display: none;
-    }}
-    .advanced-control.hidden {{
-      display: none;
-    }}
-    .start-here {{
-      border: 1px solid #d7b483;
-      background: linear-gradient(180deg, #fff8ef, #fff4e6);
-    }}
-    .start-here h3 {{
-      margin-bottom: 6px;
-    }}
-    .start-list {{
-      margin: 0;
-      padding-left: 20px;
-      color: var(--ink-soft);
-      font-size: 13px;
-      line-height: 1.4;
-    }}
-    .wizard-nav {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin: 8px 0 12px;
-    }}
-    .wizard-progress {{
-      font-size: 12px;
-      color: var(--muted);
-      margin-left: auto;
-    }}
-    .wizard-page {{
-      display: none;
-    }}
-    .wizard-page.active {{
-      display: block;
-    }}
-    .inbox-list, .schedule-list, .wizard-list {{
-      display: grid;
-      gap: 8px;
-      margin-top: 8px;
-    }}
-    .inbox-item, .schedule-item, .wizard-item {{
-      border: 1px solid var(--line-soft);
-      border-radius: 10px;
-      padding: 8px;
-      background: rgba(255, 255, 255, 0.8);
-      font-size: 13px;
-    }}
-    .mini-actions {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 6px;
-    }}
-    .mini-actions button {{
-      padding: 6px 9px;
-      border-radius: 8px;
-      font-size: 12px;
-    }}
-    .job-meta {{ font-size: 13px; color: var(--muted); margin-bottom: 8px; }}
-    @media (max-width: 920px) {{
-      .layout {{ grid-template-columns: 1fr; }}
-      h1 {{ font-size: 30px; }}
-    }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="hero">
-      <h1>BorisBot Guided Validation</h1>
-      <p>Use this guided workspace to set up BorisBot in minutes, then unlock advanced controls when needed.</p>
-      <div class="hero-meta">
-        <span class="chip">Local-first runtime</span>
-        <span class="chip">Deterministic executor</span>
-        <span class="chip">Cost and permission guardrails</span>
-        <button class="mode-chip" id="mode-simple" onclick="setGuideMode('simple')">Simple Onboarding</button>
-        <button class="mode-chip" id="mode-full" onclick="setGuideMode('full')">Full Workspace</button>
-      </div>
-    </div>
-
-    <div class="layout">
-      <section class="card">
-        <label for="workflow">Workflow file</label>
-        <select id="workflow">{options}</select>
-        <div class="wizard-nav">
-          <button type="button" class="secondary" id="wizard-back" onclick="prevWizardPage()">Back</button>
-          <button type="button" id="wizard-next" onclick="nextWizardPage()">Next</button>
-          <span class="wizard-progress" id="wizard-progress">Step 1/1</span>
-        </div>
-        <div class="wizard-page" id="wizard-page-setup" data-page-title="Setup">
-        <div class="step start-here">
-          <h3>Start Here</h3>
-          <p>Follow these steps in order. Keep <strong>Simple Onboarding</strong> mode on for first run.</p>
-          <ol class="start-list">
-            <li>Run One-Touch LLM Setup.</li>
-            <li>Run Bootstrap Setup and Verify.</li>
-            <li>Run Dry-Run Planner.</li>
-            <li>Approve required permissions.</li>
-            <li>Execute approved plan.</li>
-          </ol>
-        </div>
-        <label for="agent_name" class="advanced-control">Agent name</label>
-        <input id="agent_name" class="advanced-control" value="default" />
-        <label for="provider_chain" class="advanced-control">Provider chain (comma-separated, max 5)</label>
-        <input id="provider_chain" class="advanced-control" value="ollama" />
-        <label for="primary_provider">Primary provider</label>
-        <input id="primary_provider" value="ollama" />
-        <div class="step">
-          <h3>Provider Onboarding</h3>
-          <p>Configure primary/fallback providers and API credentials (stored locally).</p>
-          <div id="provider-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;"></div>
-          <div class="actions">
-            <button class="secondary" onclick="refreshProviderSecrets()">Refresh Provider Status</button>
-            <button onclick="testPrimaryProvider()">Test Primary Provider</button>
-          </div>
-        </div>
-        <label for="task" class="advanced-control">New task id for recording</label>
-        <input id="task" class="advanced-control" value="wf_demo" />
-        <label for="agent">Agent id</label>
-        <input id="agent" value="default" onchange="refreshPermissions();loadChatHistory();" />
-        <label for="start" class="advanced-control">Start URL for recording</label>
-        <input id="start" class="advanced-control" value="https://example.com" />
-        <label for="model">Ollama model</label>
-        <input id="model" value="llama3.2:3b" />
-        <label for="recommended_model">Recommended model preset</label>
-        <select id="recommended_model" onchange="applyRecommendedModel()">
-          <option value="llama3.2:3b">Balanced: llama3.2:3b</option>
-          <option value="qwen2.5:3b">Fast: qwen2.5:3b</option>
-          <option value="mistral:7b">Higher quality: mistral:7b</option>
-        </select>
-        </div>
-        <div class="wizard-page" id="wizard-page-validate" data-page-title="Validate">
-        <label for="budget_system_daily" class="advanced-control">System daily budget (USD)</label>
-        <input id="budget_system_daily" class="advanced-control" value="" placeholder="e.g. 10" />
-        <label for="budget_agent_daily" class="advanced-control">Agent daily budget (USD)</label>
-        <input id="budget_agent_daily" class="advanced-control" value="" placeholder="e.g. 5" />
-        <label for="budget_monthly" class="advanced-control">Monthly budget (USD)</label>
-        <input id="budget_monthly" class="advanced-control" value="" placeholder="e.g. 100" />
-        <label for="prompt">Dry-run planner prompt</label>
-        <textarea id="prompt" rows="4" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:10px;">Open LinkedIn feed, scroll a few posts, and like one relevant post.</textarea>
-        <div class="step">
-          <h3>Live Cost Estimator</h3>
-          <p>Estimated tokens/cost for current planner and assistant prompts (refreshes every 30s).</p>
-          <pre id="cost-estimate" style="margin-top:8px;min-height:90px;max-height:180px;">No estimate yet.</pre>
-        </div>
-
-        <div class="step">
-          <h3>1. Environment</h3>
-          <p>Confirm Docker and Ollama are ready, then validate baseline.</p>
-          <div class="actions">
-            <button onclick="runAction('docker_info')">Check Docker</button>
-            <button onclick="runAction('ollama_install')">Install Ollama</button>
-            <button onclick="runAction('ollama_check')">Check Ollama</button>
-            <button onclick="runAction('ollama_start')">Start Ollama</button>
-            <button onclick="runAction('ollama_pull')">Pull Model</button>
-            <button onclick="runOneTouchLlmSetup()">One-Touch LLM Setup</button>
-            <button onclick="runBootstrapSetup()">Run Bootstrap Setup</button>
-            <button onclick="runAction('cleanup_sessions')">Reset Browser Sessions</button>
-            <button class="secondary" onclick="runAction('doctor')">Run Doctor</button>
-            <button onclick="runAction('verify')">Run Verify</button>
-            <button onclick="runAction('session_status')">Session Status</button>
-            <button onclick="runAction('budget_status')">Budget Status</button>
-            <button class="secondary" onclick="runAction('budget_set')">Apply Budget Limits</button>
-            <button class="secondary" onclick="showOllamaSetupPlan()">Show Setup Plan</button>
-            <button onclick="runPlanPreview()">Dry-Run Planner</button>
-            <button class="secondary" onclick="approveRequiredPermissions()">Approve Required Permissions</button>
-            <button onclick="executeApprovedPlan()">Execute Approved Plan</button>
-            <button onclick="saveProfile()">Save Profile</button>
-          </div>
-          <pre id="ollama-setup-plan" style="margin-top:8px;min-height:70px;"></pre>
-          <pre id="plan-permissions" style="margin-top:8px;min-height:70px;">No plan permissions yet.</pre>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>2. Record Workflow</h3>
-          <p>Click start, perform actions in the opened noVNC browser, then click stop.</p>
-          <div class="actions">
-            <button class="secondary" onclick="startRecord()">Start Recording</button>
-            <button onclick="stopCurrent()">Stop Recording</button>
-          </div>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>Permission Matrix</h3>
-          <p>Set per-agent tool decisions used by dry-run and execution gates.</p>
-          <div id="permission-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;"></div>
-          <div class="actions">
-            <button class="secondary" onclick="refreshPermissions()">Refresh Permissions</button>
-            <select id="policy-pack" style="min-width:190px;">
-              <option value="safe-local">safe-local</option>
-              <option value="web-readonly">web-readonly</option>
-              <option value="automation">automation</option>
-            </select>
-            <button class="secondary" onclick="applySelectedPolicy()">Apply Policy Pack</button>
-          </div>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>3. Analyze and Lint</h3>
-          <p>Score selectors and catch fragile workflows early.</p>
-          <div class="actions">
-            <button onclick="runAction('analyze')">Analyze Workflow</button>
-            <button onclick="runAction('lint')">Lint Workflow</button>
-          </div>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>4. Replay and Gate</h3>
-          <p>Replay deterministically and run release-check in both modes.</p>
-          <div class="actions">
-            <button onclick="runAction('replay')">Replay Workflow</button>
-            <button onclick="runAction('release_check')">Release Check</button>
-            <button onclick="runAction('release_check_json')">Release Check JSON</button>
-          </div>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>Planner Chat</h3>
-          <p>Ask for a plan in natural language. Response is validated dry-run JSON.</p>
-          <textarea id="chat-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Open LinkedIn, scan posts, and like one post about AI tooling."></textarea>
-          <div class="actions">
-            <button class="secondary" onclick="sendChatPrompt()">Send To Planner</button>
-            <button onclick="clearChatHistory()">Clear Chat</button>
-          </div>
-          <pre id="chat-history" style="margin-top:8px;min-height:120px;max-height:220px;"></pre>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>Assistant Chat</h3>
-          <p>General LLM chat for non-execution tasks (research, drafting, reasoning).</p>
-          <textarea id="assistant-input" rows="3" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Summarize tradeoffs of deterministic browser automation vs visual agents."></textarea>
-          <div class="actions">
-            <button class="secondary" onclick="sendAssistantPrompt()">Ask Assistant</button>
-            <button class="secondary" onclick="handoffLastAssistantTrace()">Use Reply As Planner Prompt</button>
-            <button onclick="clearAssistantHistory()">Clear Assistant</button>
-          </div>
-          <pre id="assistant-output" style="margin-top:8px;min-height:120px;max-height:220px;">No assistant responses yet.</pre>
-        </div>
-
-        <div class="step">
-          <h3>First-Run Wizard</h3>
-          <p>Track onboarding progress and complete setup gates in order.</p>
-          <div class="actions">
-            <button class="secondary" onclick="refreshWizardState()">Refresh Wizard</button>
-          </div>
-          <div id="wizard-list" class="wizard-list"></div>
-        </div>
-        </div>
-
-        <div class="wizard-page advanced-step" id="wizard-page-advanced" data-page-title="Advanced Workspace">
-        <div class="step advanced-step">
-          <h3>Task Inbox</h3>
-          <p>Capture recurring intents and route them into planner flow.</p>
-          <label for="inbox-intent">New inbox intent</label>
-          <textarea id="inbox-intent" rows="2" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Check trending AI posts and summarize top 3."></textarea>
-          <label for="inbox-priority">Priority</label>
-          <select id="inbox-priority">
-            <option value="normal">normal</option>
-            <option value="high">high</option>
-            <option value="low">low</option>
-          </select>
-          <div class="actions">
-            <button onclick="addInboxItem()">Add Inbox Item</button>
-            <button class="secondary" onclick="refreshInbox()">Refresh Inbox</button>
-          </div>
-          <div id="inbox-list" class="inbox-list"></div>
-        </div>
-
-        <div class="step advanced-step">
-          <h3>Scheduler</h3>
-          <p>Create recurring intents that automatically enqueue into Task Inbox.</p>
-          <label for="schedule-intent">Schedule intent</label>
-          <textarea id="schedule-intent" rows="2" style="width:100%;border:1px solid var(--border);border-radius:10px;padding:9px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;" placeholder="Example: Daily LinkedIn feed scan and summary."></textarea>
-          <label for="schedule-interval">Interval (minutes)</label>
-          <input id="schedule-interval" value="60" />
-          <div class="actions">
-            <button onclick="createSchedule()">Create Schedule</button>
-            <button class="secondary" onclick="refreshSchedules()">Refresh Schedules</button>
-          </div>
-          <div id="schedule-list" class="schedule-list"></div>
-        </div>
-        </div>
-      </section>
-
-      <section class="card" id="viewer-card">
-        <div class="step" style="margin-top:0;padding-top:0;border-top:0;">
-          <h3>Runtime Status</h3>
-          <p id="runtime-line">Loading...</p>
-          <div id="onboarding-list" class="onboarding-list"></div>
-          <div id="provider-cards" class="provider-cards"></div>
-        </div>
-        <div class="job-meta" id="meta">No command running.</div>
-        <pre id="plan-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
-        <div class="actions" style="margin-bottom:8px;">
-          <select id="trace-filter" style="min-width:150px;" onchange="refreshTraces()">
-            <option value="all">all traces</option>
-            <option value="assistant_chat">assistant_chat</option>
-            <option value="plan_preview">plan_preview</option>
-            <option value="action_run">action_run</option>
-          </select>
-          <select id="trace-select" style="flex:1;min-width:240px;" onchange="loadSelectedTrace()"></select>
-          <button class="secondary" onclick="loadSelectedTrace()">View Trace</button>
-          <button class="secondary" onclick="handoffSelectedAssistantTrace()">Handoff Trace To Planner</button>
-          <button onclick="exportSelectedTrace()">Export Trace JSON</button>
-          <button class="secondary" onclick="exportSupportBundle()">Export Support Bundle</button>
-        </div>
-        <pre id="trace-summary" style="margin-bottom:10px;min-height:90px;max-height:170px;">No trace selected.</pre>
-        <pre id="trace-output" style="margin-bottom:10px;min-height:120px;max-height:220px;"></pre>
-        <a class="browser-link" id="browser-link" href="#" target="_blank" style="display:none;"></a>
-        <div class="viewer-toolbar">
-          <button class="mode" data-mode="terminal" onclick="setViewMode('terminal')">Terminal View</button>
-          <button class="mode" data-mode="browser" onclick="setViewMode('browser')">Browser View</button>
-          <button class="mode" data-mode="split" onclick="setViewMode('split')">Split View</button>
-          <button onclick="maximizePane('terminal-pane')">Maximize Terminal</button>
-          <button onclick="maximizePane('browser-pane')">Maximize Browser</button>
-        </div>
-        <div class="viewer-grid mode-split" id="viewer-grid">
-          <div class="pane" id="terminal-pane">
-            <div class="pane-header">Terminal Output</div>
-            <div class="pane-body">
-              <pre id="output"></pre>
-            </div>
-          </div>
-          <div class="pane" id="browser-pane">
-            <div class="pane-header">Live Browser (noVNC)</div>
-            <div class="pane-body">
-              <iframe id="browser-frame" title="Browser view"></iframe>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-  </div>
-
-  <script>
-    let currentJobId = null;
-    let pollHandle = null;
-    let viewMode = 'split';
-    let lastPlanTraceId = null;
-    let lastAssistantTraceId = null;
-    let lastRequiredPermissions = [];
-    let chatHistory = [];
-    let assistantHistory = [];
-    const providerNames = ['ollama', 'openai', 'anthropic', 'google', 'azure'];
-    const recommendedModels = ['llama3.2:3b', 'qwen2.5:3b', 'mistral:7b'];
-    let guideMode = 'simple';
-    let wizardPageIndex = 0;
-
-    function wizardPageOrder() {{
-      const order = ['wizard-page-setup', 'wizard-page-validate'];
-      if (guideMode === 'full') {{
-        order.push('wizard-page-advanced');
-      }}
-      return order;
-    }}
-
-    function applyWizardPage(nextIndex) {{
-      const pageIds = wizardPageOrder();
-      const pages = pageIds
-        .map(pageId => document.getElementById(pageId))
-        .filter(Boolean);
-      if (!pages.length) {{
-        document.getElementById('wizard-progress').textContent = 'Step 0/0';
-        return;
-      }}
-      wizardPageIndex = Math.max(0, Math.min(nextIndex, pages.length - 1));
-      for (const page of document.querySelectorAll('.wizard-page')) {{
-        page.classList.remove('active');
-        page.style.display = 'none';
-      }}
-      const active = pages[wizardPageIndex];
-      active.classList.add('active');
-      active.style.display = 'block';
-      const title = active.getAttribute('data-page-title') || `Step ${{wizardPageIndex + 1}}`;
-      document.getElementById('wizard-progress').textContent = `Step ${{wizardPageIndex + 1}}/${{pages.length}}: ${{title}}`;
-      const backBtn = document.getElementById('wizard-back');
-      const nextBtn = document.getElementById('wizard-next');
-      if (backBtn) backBtn.disabled = wizardPageIndex === 0;
-      if (nextBtn) nextBtn.disabled = wizardPageIndex >= (pages.length - 1);
-    }}
-
-    function nextWizardPage() {{
-      applyWizardPage(wizardPageIndex + 1);
-    }}
-
-    function prevWizardPage() {{
-      applyWizardPage(wizardPageIndex - 1);
-    }}
-
-    function setGuideMode(mode) {{
-      guideMode = (mode === 'full') ? 'full' : 'simple';
-      const advanced = document.querySelectorAll('.advanced-step');
-      for (const node of advanced) {{
-        node.classList.toggle('hidden', guideMode !== 'full');
-      }}
-      const advancedControls = document.querySelectorAll('.advanced-control');
-      for (const node of advancedControls) {{
-        node.classList.toggle('hidden', guideMode !== 'full');
-      }}
-      const simpleBtn = document.getElementById('mode-simple');
-      const fullBtn = document.getElementById('mode-full');
-      if (simpleBtn) simpleBtn.classList.toggle('active', guideMode === 'simple');
-      if (fullBtn) fullBtn.classList.toggle('active', guideMode === 'full');
-      try {{
-        window.localStorage.setItem('borisbot_guide_mode', guideMode);
-      }} catch (e) {{
-        // ignore storage failure
-      }}
-      applyWizardPage(0);
-    }}
-
-    function applyRecommendedModel() {{
-      const preset = document.getElementById('recommended_model');
-      const modelInput = document.getElementById('model');
-      if (!preset || !modelInput) return;
-      const value = (preset.value || '').trim();
-      if (!value) return;
-      modelInput.value = value;
-      showOllamaSetupPlan();
-      refreshCostEstimator();
-    }}
-
-    function syncRecommendedModelFromInput() {{
-      const preset = document.getElementById('recommended_model');
-      const modelInput = document.getElementById('model');
-      if (!preset || !modelInput) return;
-      const value = (modelInput.value || '').trim();
-      if (recommendedModels.includes(value)) {{
-        preset.value = value;
-      }}
-    }}
-
-    function currentParams() {{
-      return {{
-        workflow_path: document.getElementById('workflow').value,
-        task_id: document.getElementById('task').value,
-        agent_id: document.getElementById('agent').value,
-        start_url: document.getElementById('start').value,
-        model_name: document.getElementById('model').value
-        ,
-        budget_system_daily: document.getElementById('budget_system_daily') ? document.getElementById('budget_system_daily').value : '',
-        budget_agent_daily: document.getElementById('budget_agent_daily') ? document.getElementById('budget_agent_daily').value : '',
-        budget_monthly: document.getElementById('budget_monthly') ? document.getElementById('budget_monthly').value : '',
-        policy_name: document.getElementById('policy-pack') ? document.getElementById('policy-pack').value : 'safe-local'
-      }};
-    }}
-
-    async function runAction(action, approvePermission=false) {{
-      const response = await fetch('/api/run', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{action, params: currentParams(), approve_permission: approvePermission}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        if (data.error === 'permission_required') {{
-          const ok = window.confirm(`${{data.message}} Approve now?`);
-          if (ok) {{
-            const result = await runAction(action, true);
-            refreshPermissions();
-            return result;
-          }}
-          document.getElementById('meta').textContent = 'Permission not granted: ' + (data.tool_name || '');
-          return;
-        }}
-        document.getElementById('meta').textContent = 'Failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      currentJobId = data.job_id;
-      if (action.startsWith('policy_')) {{
-        refreshPermissions();
-        refreshRuntimeStatus();
-      }}
-      if (action === 'doctor' || action === 'verify' || action === 'llm_setup' || action === 'bootstrap_setup') {{
-        refreshWizardState();
-      }}
-      startPolling();
-      return data;
-    }}
-
-    async function waitForJobCompletion(jobId, timeoutMs=180000) {{
-      const started = Date.now();
-      while ((Date.now() - started) < timeoutMs) {{
-        const response = await fetch(`/api/jobs/${{jobId}}`);
-        if (!response.ok) {{
-          throw new Error('job_status_fetch_failed');
-        }}
-        const data = await response.json();
-        document.getElementById('meta').textContent = `[${{data.status}}] ${{data.command}}`;
-        document.getElementById('output').textContent = data.output || '';
-        updateBrowserLink(data.browser_ui_url || '');
-        if (data.status !== 'running') {{
-          return data;
-        }}
-        await new Promise(resolve => setTimeout(resolve, 900));
-      }}
-      throw new Error('job_timeout');
-    }}
-
-    async function runActionAndWait(action) {{
-      const data = await runAction(action);
-      if (!data || !data.job_id) {{
-        throw new Error('job_submit_failed');
-      }}
-      return waitForJobCompletion(data.job_id);
-    }}
-
-    async function runOneTouchLlmSetup() {{
-      document.getElementById('meta').textContent = 'Starting one-touch LLM setup...';
-      try {{
-        const setupJob = await runActionAndWait('llm_setup');
-        let payload = null;
-        try {{
-          payload = JSON.parse(setupJob.output || '{{}}');
-        }} catch (e) {{
-          payload = null;
-        }}
-        if (!payload) {{
-          document.getElementById('meta').textContent = 'One-touch setup failed. Invalid setup payload.';
-          return;
-        }}
-        const steps = Array.isArray(payload.steps) ? payload.steps : [];
-        const lines = [];
-        for (const step of steps) {{
-          if (!step || typeof step !== 'object') continue;
-          const name = step.step || 'step';
-          const status = step.status || 'unknown';
-          const cmd = step.command || '';
-          lines.push(`[${{status}}] ${{name}}${{cmd ? ' :: ' + cmd : ''}}`);
-          if (step.output) {{
-            lines.push(String(step.output));
-          }}
-        }}
-        if (lines.length) {{
-          document.getElementById('output').textContent = lines.join('\\n');
-        }}
-        if (payload.status !== 'ok') {{
-          const errorCode = payload.error || 'SETUP_FAILED';
-          const message = payload.message || 'Review terminal output.';
-          document.getElementById('meta').textContent = `One-touch setup failed: ${{errorCode}} (${{message}})`;
-          return;
-        }}
-        document.getElementById('meta').textContent = 'One-touch LLM setup completed.';
-        refreshRuntimeStatus();
-      }} catch (e) {{
-        document.getElementById('meta').textContent = 'One-touch setup failed unexpectedly.';
-      }}
-    }}
-
-    async function runBootstrapSetup() {{
-      document.getElementById('meta').textContent = 'Starting bootstrap setup...';
-      try {{
-        const setupJob = await runActionAndWait('bootstrap_setup');
-        let payload = null;
-        try {{
-          payload = JSON.parse(setupJob.output || '{{}}');
-        }} catch (e) {{
-          payload = null;
-        }}
-        if (!payload) {{
-          document.getElementById('meta').textContent = 'Bootstrap setup failed. Invalid setup payload.';
-          return;
-        }}
-        document.getElementById('output').textContent = JSON.stringify(payload, null, 2);
-        const status = String(payload.status || 'unknown').toUpperCase();
-        document.getElementById('meta').textContent = `Bootstrap setup: ${{status}}`;
-      }} catch (e) {{
-        document.getElementById('meta').textContent = 'Bootstrap setup failed. Check terminal output.';
-      }}
-      refreshRuntimeStatus();
-      refreshPermissions();
-    }}
-
-    async function applySelectedPolicy() {{
-      const data = await runAction('policy_apply');
-      if (data && data.job_id) {{
-        document.getElementById('meta').textContent = 'Applying policy pack...';
-      }}
-    }}
-
-    async function showOllamaSetupPlan() {{
-      const model_name = document.getElementById('model').value || 'llama3.2:3b';
-      const response = await fetch(`/api/ollama-setup-plan?model_name=${{encodeURIComponent(model_name)}}`);
-      if (!response.ok) {{
-        document.getElementById('ollama-setup-plan').textContent = 'Failed to load setup plan.';
-        return;
-      }}
-      const data = await response.json();
-      const lines = [];
-      lines.push(`platform: ${{data.platform || 'unknown'}}`);
-      lines.push(`model: ${{data.model_name || model_name}}`);
-      if (Array.isArray(data.install_command) && data.install_command.length) {{
-        lines.push(`install: ${{data.install_command.join(' ')}}`);
-      }} else {{
-        lines.push('install: manual download required');
-      }}
-      if (data.install_error) {{
-        lines.push(`install_note: ${{data.install_error}}`);
-      }}
-      if (Array.isArray(data.start_command) && data.start_command.length) {{
-        lines.push(`start: ${{data.start_command.join(' ')}}`);
-      }}
-      if (Array.isArray(data.pull_command) && data.pull_command.length) {{
-        lines.push(`pull: ${{data.pull_command.join(' ')}}`);
-      }}
-      if (data.manual_download_url) {{
-        lines.push(`download: ${{data.manual_download_url}}`);
-      }}
-      document.getElementById('ollama-setup-plan').textContent = lines.join('\\n');
-    }}
-
-    async function loadProfile() {{
-      try {{
-        const response = await fetch('/api/profile');
-        if (!response.ok) return;
-        const profile = await response.json();
-        document.getElementById('agent_name').value = profile.agent_name || 'default';
-        if (!document.getElementById('agent').value) {{
-          document.getElementById('agent').value = profile.agent_name || 'default';
-        }}
-        document.getElementById('primary_provider').value = profile.primary_provider || 'ollama';
-        document.getElementById('provider_chain').value = Array.isArray(profile.provider_chain)
-          ? profile.provider_chain.join(',')
-          : 'ollama';
-        renderProviderGrid(profile.provider_settings || {{}});
-        const primary = profile.primary_provider || 'ollama';
-        const providerSettings = profile.provider_settings || {{}};
-        const primaryModel = providerSettings[primary] && providerSettings[primary].model_name
-          ? providerSettings[primary].model_name
-          : '';
-        document.getElementById('model').value = primaryModel || profile.model_name || 'llama3.2:3b';
-        refreshProviderSecrets();
-      }} catch (e) {{
-        // ignore profile load failures
-      }}
-    }}
-
-    function renderProviderGrid(providerSettings) {{
-      const rows = providerNames.map(name => {{
-        const settings = providerSettings[name] || {{}};
-        const enabled = !!settings.enabled;
-        const modelName = settings.model_name || '';
-        const checked = enabled ? 'checked' : '';
-        const secretField = name === 'ollama'
-          ? ''
-          : `<label style="margin:0;">${{name}} API key</label>
-             <input id="provider_key_${{name}}" type="password" placeholder="Paste key (blank keeps existing)" />`;
-        return `
-          <label style="margin:0;">${{name}} enabled</label>
-          <input id="provider_enabled_${{name}}" type="checkbox" ${{checked}} />
-          <label style="margin:0;">${{name}} model</label>
-          <input id="provider_model_${{name}}" value="${{modelName}}" />
-          ${{secretField}}
-          ${{name === 'ollama' ? '' : `<div id="provider_secret_status_${{name}}" style="font-size:12px;color:var(--muted);">status: unknown</div>`}}
-        `;
-      }}).join('');
-      document.getElementById('provider-grid').innerHTML = rows;
-    }}
-
-    async function saveProfile() {{
-      const providerChain = document.getElementById('provider_chain').value
-        .split(',')
-        .map(x => x.trim())
-        .filter(Boolean);
-      const providerSettings = {{}};
-      for (const provider of providerNames) {{
-        const enabledEl = document.getElementById(`provider_enabled_${{provider}}`);
-        const modelEl = document.getElementById(`provider_model_${{provider}}`);
-        providerSettings[provider] = {{
-          enabled: !!(enabledEl && enabledEl.checked),
-          model_name: modelEl ? (modelEl.value || '').trim() : ''
-        }};
-      }}
-      const payload = {{
-        schema_version: 'profile.v2',
-        agent_name: document.getElementById('agent_name').value || 'default',
-        primary_provider: document.getElementById('primary_provider').value || 'ollama',
-        provider_chain: providerChain.length ? providerChain : ['ollama'],
-        model_name: document.getElementById('model').value || 'llama3.2:3b',
-        provider_settings: providerSettings
-      }};
-      const response = await fetch('/api/profile', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify(payload)
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Profile save failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      document.getElementById('meta').textContent = 'Profile saved.';
-      document.getElementById('agent').value = payload.agent_name;
-      await saveProviderSecrets();
-      refreshPermissions();
-      refreshRuntimeStatus();
-    }}
-
-    async function refreshProviderSecrets() {{
-      try {{
-        const response = await fetch('/api/provider-secrets');
-        if (!response.ok) return;
-        const data = await response.json();
-        const providers = data.providers || {{}};
-        for (const provider of providerNames) {{
-          if (provider === 'ollama') continue;
-          const statusEl = document.getElementById(`provider_secret_status_${{provider}}`);
-          if (!statusEl) continue;
-          const row = providers[provider] || {{}};
-          const configured = !!row.configured;
-          const masked = row.masked || '';
-          statusEl.textContent = configured ? `status: configured (${{masked}})` : 'status: not configured';
-        }}
-      }} catch (e) {{
-        // ignore provider secret refresh failures
-      }}
-    }}
-
-    async function saveProviderSecrets() {{
-      for (const provider of providerNames) {{
-        if (provider === 'ollama') continue;
-        const keyEl = document.getElementById(`provider_key_${{provider}}`);
-        if (!keyEl) continue;
-        const key = (keyEl.value || '').trim();
-        if (!key) continue;
-        const response = await fetch('/api/provider-secrets', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{ provider, api_key: key }})
-        }});
-        if (response.ok) {{
-          keyEl.value = '';
-        }}
-      }}
-      await refreshProviderSecrets();
-    }}
-
-    async function testPrimaryProvider() {{
-      const provider_name = document.getElementById('primary_provider').value || 'ollama';
-      const model_name = document.getElementById('model').value || 'llama3.2:3b';
-      const response = await fetch('/api/provider-test', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{ provider_name, model_name }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Provider test failed: ' + (data.message || data.error || 'unknown error');
-        return;
-      }}
-      document.getElementById('meta').textContent = 'Provider test OK: ' + (data.message || provider_name);
-    }}
-
-    async function refreshCostEstimator() {{
-      try {{
-        const response = await fetch('/api/cost-estimate', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{
-            provider_name: document.getElementById('primary_provider').value || 'ollama',
-            planner_prompt: document.getElementById('prompt').value || '',
-            assistant_prompt: document.getElementById('assistant-input').value || ''
-          }})
-        }});
-        if (!response.ok) return;
-        const data = await response.json();
-        const planner = data.planner || {{}};
-        const assistant = data.assistant || {{}};
-        const lines = [
-          `Provider: ${{data.provider_name || 'unknown'}}`,
-          '',
-          `Planner: tokens=${{planner.total_tokens || 0}} (in=${{planner.input_tokens || 0}}, out=${{planner.output_tokens || 0}}) | est=$${{Number(planner.cost_estimate_usd || 0).toFixed(4)}}`,
-          `Assistant: tokens=${{assistant.total_tokens || 0}} (in=${{assistant.input_tokens || 0}}, out=${{assistant.output_tokens || 0}}) | est=$${{Number(assistant.cost_estimate_usd || 0).toFixed(4)}}`,
-        ];
-        document.getElementById('cost-estimate').textContent = lines.join('\\n');
-      }} catch (e) {{
-        // keep previous estimate on transient failures
-      }}
-    }}
-
-    function permissionOptionMarkup(selected) {{
-      const values = ['prompt', 'allow', 'deny'];
-      return values.map(v => `<option value="${{v}}" ${{selected === v ? 'selected' : ''}}>${{v}}</option>`).join('');
-    }}
-
-    async function refreshPermissions() {{
-      const agentId = document.getElementById('agent').value || 'default';
-      try {{
-        const response = await fetch(`/api/permissions?agent_id=${{encodeURIComponent(agentId)}}`);
-        if (!response.ok) return;
-        const data = await response.json();
-        const permissions = data.permissions || {{}};
-        const tools = Object.keys(permissions).sort();
-        const html = tools.map(tool => `
-          <label style="margin:0;">${{tool}}</label>
-          <select id="perm_${{tool}}" onchange="savePermission('${{tool}}')">
-            ${{permissionOptionMarkup(permissions[tool])}}
-          </select>
-        `).join('');
-        document.getElementById('permission-grid').innerHTML = html;
-      }} catch (e) {{
-        // ignore transient permission fetch failures
-      }}
-    }}
-
-    async function savePermission(toolName) {{
-      const agentId = document.getElementById('agent').value || 'default';
-      const select = document.getElementById(`perm_${{toolName}}`);
-      if (!select) return;
-      const decision = select.value;
-      const response = await fetch('/api/permissions', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{agent_id: agentId, tool_name: toolName, decision}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Permission update failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      document.getElementById('meta').textContent = `Permission updated: ${{toolName}}=${{decision}}`;
-    }}
-
-    async function runPlanPreview() {{
-      const response = await fetch('/api/plan-preview', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{
-          intent: document.getElementById('prompt').value,
-          agent_id: document.getElementById('agent').value,
-          model_name: document.getElementById('model').value,
-          provider_name: document.getElementById('primary_provider').value || 'ollama'
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('plan-output').textContent = 'Dry-run failed: ' + (data.error || 'unknown error');
-        renderRequiredPermissions([]);
-        lastPlanTraceId = null;
-        return;
-      }}
-      lastPlanTraceId = data.trace_id || null;
-      document.getElementById('plan-output').textContent = JSON.stringify(data, null, 2);
-      renderRequiredPermissions(data.required_permissions || []);
-      refreshTraces();
-    }}
-
-    function renderRequiredPermissions(requiredPermissions) {{
-      const rows = Array.isArray(requiredPermissions) ? requiredPermissions : [];
-      lastRequiredPermissions = rows.map(item => {{
-        if (!item || typeof item !== 'object') return {{ tool_name: '', decision: 'prompt' }};
-        return {{
-          tool_name: String(item.tool_name || '').trim(),
-          decision: String(item.decision || 'prompt').trim().toLowerCase(),
-        }};
-      }}).filter(item => !!item.tool_name);
-      if (!lastRequiredPermissions.length) {{
-        document.getElementById('plan-permissions').textContent = 'No plan permissions yet.';
-        return;
-      }}
-      const pending = lastRequiredPermissions.filter(item => item.decision !== 'allow');
-      const lines = [
-        `Required permissions: ${{lastRequiredPermissions.length}}`,
-        `Pending approvals: ${{pending.length}}`,
-        '',
-      ];
-      for (const item of lastRequiredPermissions) {{
-        lines.push(`[${{item.decision}}] ${{item.tool_name}}`);
-      }}
-      document.getElementById('plan-permissions').textContent = lines.join('\\n');
-    }}
-
-    async function approveRequiredPermissions() {{
-      if (!lastRequiredPermissions.length) {{
-        document.getElementById('meta').textContent = 'No required permissions to approve. Run Dry-Run Planner first.';
-        return;
-      }}
-      const agentId = document.getElementById('agent').value || 'default';
-      const pending = lastRequiredPermissions.filter(item => item.decision === 'prompt');
-      if (!pending.length) {{
-        document.getElementById('meta').textContent = 'Required permissions already approved.';
-        return;
-      }}
-      for (const item of pending) {{
-        const response = await fetch('/api/permissions', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{agent_id: agentId, tool_name: item.tool_name, decision: 'allow'}})
-        }});
-        if (!response.ok) {{
-          const data = await response.json().catch(() => ({{}}));
-          document.getElementById('meta').textContent = 'Permission update failed: ' + (data.error || item.tool_name);
-          return;
-        }}
-      }}
-      document.getElementById('meta').textContent = `Approved ${{pending.length}} required permission(s).`;
-      await refreshPermissions();
-      if (lastPlanTraceId) {{
-        await runPlanPreview();
-      }}
-    }}
-
-    function renderChatHistory() {{
-      const text = chatHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\\n\\n');
-      document.getElementById('chat-history').textContent = text || 'No planner messages yet.';
-    }}
-
-    function renderAssistantHistory() {{
-      const text = assistantHistory.map(item => `[${{item.role}}] ${{item.text}}`).join('\\n\\n');
-      document.getElementById('assistant-output').textContent = text || 'No assistant responses yet.';
-    }}
-
-    async function loadChatHistory() {{
-      const agentId = document.getElementById('agent').value || 'default';
-      try {{
-        const response = await fetch(`/api/chat-history?agent_id=${{encodeURIComponent(agentId)}}`);
-        if (!response.ok) return;
-        const data = await response.json();
-        const items = Array.isArray(data.items) ? data.items : [];
-        chatHistory = items.filter(x => x.role === 'user' || x.role === 'planner');
-        assistantHistory = items.filter(x => x.role === 'assistant_user' || x.role === 'assistant');
-        renderChatHistory();
-        renderAssistantHistory();
-      }} catch (e) {{
-        // ignore chat load failures
-      }}
-    }}
-
-    async function appendChatHistory(role, text) {{
-      const agentId = document.getElementById('agent').value || 'default';
-      try {{
-        await fetch('/api/chat-history', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{agent_id: agentId, role, text}})
-        }});
-      }} catch (e) {{
-        // ignore chat save failures
-      }}
-    }}
-
-    async function clearChatHistory() {{
-      const agentId = document.getElementById('agent').value || 'default';
-      try {{
-        await fetch('/api/chat-clear', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{agent_id: agentId}})
-        }});
-      }} catch (e) {{
-        // ignore chat clear failures
-      }}
-      chatHistory = [];
-      assistantHistory = [];
-      renderChatHistory();
-      renderAssistantHistory();
-    }}
-
-    async function clearAssistantHistory() {{
-      const agentId = document.getElementById('agent').value || 'default';
-      try {{
-        await fetch('/api/chat-clear-assistant', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{agent_id: agentId}})
-        }});
-      }} catch (e) {{
-        // ignore chat clear failures
-      }}
-      assistantHistory = [];
-      renderAssistantHistory();
-    }}
-
-    async function sendChatPrompt() {{
-      const input = document.getElementById('chat-input');
-      const prompt = (input.value || '').trim();
-      if (!prompt) return;
-      chatHistory.push({{ role: 'user', text: prompt }});
-      renderChatHistory();
-      appendChatHistory('user', prompt);
-      const response = await fetch('/api/plan-preview', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{
-          intent: prompt,
-          agent_id: document.getElementById('agent').value,
-          model_name: document.getElementById('model').value,
-          provider_name: document.getElementById('primary_provider').value || 'ollama'
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        const msg = 'Dry-run failed: ' + (data.error || 'unknown error');
-        chatHistory.push({{ role: 'planner', text: msg }});
-        appendChatHistory('planner', msg);
-        renderChatHistory();
-        return;
-      }}
-      lastPlanTraceId = data.trace_id || null;
-      document.getElementById('plan-output').textContent = JSON.stringify(data, null, 2);
-      const summary = {{
-        status: data.status,
-        trace_id: data.trace_id,
-        token_estimate: data.token_estimate || null,
-        required_permissions: data.required_permissions || [],
-        commands: (data.validated_commands || []).map(c => c.action),
-      }};
-      renderRequiredPermissions(data.required_permissions || []);
-      const plannerText = JSON.stringify(summary, null, 2);
-      chatHistory.push({{ role: 'planner', text: plannerText }});
-      appendChatHistory('planner', plannerText);
-      renderChatHistory();
-      input.value = '';
-      refreshTraces();
-    }}
-
-    async function sendAssistantPrompt(approvePermission=false) {{
-      const input = document.getElementById('assistant-input');
-      const prompt = (input.value || '').trim();
-      if (!prompt) return;
-      const response = await fetch('/api/assistant-chat', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{
-          prompt,
-          agent_id: document.getElementById('agent').value,
-          model_name: document.getElementById('model').value,
-          provider_name: document.getElementById('primary_provider').value || 'ollama',
-          approve_permission: approvePermission
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        if (data.error === 'permission_required') {{
-          const ok = window.confirm(`${{data.message}} Approve now?`);
-          if (ok) {{
-            const result = await sendAssistantPrompt(true);
-            refreshPermissions();
-            return result;
-          }}
-          document.getElementById('assistant-output').textContent = 'Permission not granted: ' + (data.tool_name || '');
-          return;
-        }}
-        document.getElementById('assistant-output').textContent = 'Assistant failed: ' + (data.message || data.error || 'unknown error');
-        return;
-      }}
-      const summary = {{
-        status: data.status,
-        trace_id: data.trace_id || null,
-        provider_name: data.provider_name || null,
-        token_estimate: data.token_estimate || null,
-        cost_estimate_usd: data.cost_estimate_usd || 0,
-        message: data.message || ''
-      }};
-      assistantHistory.push({{ role: 'assistant_user', text: prompt }});
-      assistantHistory.push({{ role: 'assistant', text: JSON.stringify(summary, null, 2) }});
-      renderAssistantHistory();
-      appendChatHistory('assistant_user', prompt);
-      appendChatHistory('assistant', JSON.stringify(summary, null, 2));
-      lastAssistantTraceId = data.trace_id || null;
-      refreshTraces();
-      input.value = '';
-    }}
-
-    async function handoffAssistantTrace(traceId) {{
-      const id = (traceId || '').trim();
-      if (!id) {{
-        document.getElementById('meta').textContent = 'No assistant trace selected for handoff.';
-        return;
-      }}
-      const response = await fetch('/api/assistant-handoff', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{ trace_id: id }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Assistant handoff failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      document.getElementById('prompt').value = data.intent || '';
-      document.getElementById('meta').textContent = `Assistant handoff ready: trace=${{id}}. Review prompt, then run Dry-Run Planner.`;
-    }}
-
-    async function handoffLastAssistantTrace() {{
-      if (!lastAssistantTraceId) {{
-        document.getElementById('meta').textContent = 'No recent assistant trace found. Ask Assistant first.';
-        return;
-      }}
-      return handoffAssistantTrace(lastAssistantTraceId);
-    }}
-
-    async function handoffSelectedAssistantTrace() {{
-      const select = document.getElementById('trace-select');
-      const traceId = select.value;
-      if (!traceId) {{
-        document.getElementById('meta').textContent = 'Select a trace first.';
-        return;
-      }}
-      return handoffAssistantTrace(traceId);
-    }}
-
-    async function executeApprovedPlan(approvePermission=false, forceExecute=false) {{
-      if (!lastPlanTraceId) {{
-        document.getElementById('meta').textContent = 'Run Dry-Run Planner first.';
-        return;
-      }}
-      const pending = lastRequiredPermissions.filter(item => item.decision === 'prompt');
-      if (pending.length && !approvePermission) {{
-        const names = pending.map(item => item.tool_name).join(', ');
-        const ok = window.confirm(`This plan needs permission approval for: ${{names}}. Approve now?`);
-        if (!ok) {{
-          document.getElementById('meta').textContent = 'Execution cancelled: required permissions not approved.';
-          return;
-        }}
-        await approveRequiredPermissions();
-        return executeApprovedPlan(true, forceExecute);
-      }}
-      const response = await fetch('/api/execute-plan', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{
-          trace_id: lastPlanTraceId,
-          agent_id: document.getElementById('agent').value,
-          approve_permission: approvePermission,
-          force: forceExecute
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        if (data.error === 'trace_already_executed') {{
-          const ok = window.confirm(`${{data.message}} Force re-execute now?`);
-          if (ok) {{
-            return executeApprovedPlan(approvePermission, true);
-          }}
-          document.getElementById('meta').textContent = 'Execution skipped: trace already executed.';
-          return;
-        }}
-        if (data.error === 'permission_required') {{
-          const ok = window.confirm(`${{data.message}} Approve now?`);
-          if (ok) {{
-            const result = await executeApprovedPlan(true, forceExecute);
-            refreshPermissions();
-            return result;
-          }}
-          document.getElementById('meta').textContent = 'Permission not granted: ' + (data.tool_name || '');
-          return;
-        }}
-        document.getElementById('meta').textContent = 'Execute failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      if (data.job_id) {{
-        currentJobId = data.job_id;
-        startPolling();
-      }}
-      refreshTraces();
-    }}
-
-    function startRecord() {{
-      runAction('record');
-    }}
-
-    async function stopCurrent() {{
-      if (!currentJobId) return;
-      await fetch(`/api/jobs/${{currentJobId}}/stop`, {{ method: 'POST' }});
-    }}
-
-    function startPolling() {{
-      if (pollHandle) clearInterval(pollHandle);
-      pollHandle = setInterval(refreshJob, 900);
-      refreshJob();
-    }}
-
-    function setViewMode(mode) {{
-      viewMode = mode;
-      const grid = document.getElementById('viewer-grid');
-      grid.classList.remove('mode-terminal', 'mode-browser', 'mode-split');
-      grid.classList.add('mode-' + mode);
-      const modeButtons = document.querySelectorAll('.viewer-toolbar button.mode');
-      for (const button of modeButtons) {{
-        const buttonMode = button.getAttribute('data-mode');
-        button.classList.toggle('active', buttonMode === mode);
-      }}
-      const terminalPane = document.getElementById('terminal-pane');
-      const browserPane = document.getElementById('browser-pane');
-      terminalPane.classList.toggle('hidden', mode === 'browser');
-      browserPane.classList.toggle('hidden', mode === 'terminal');
-    }}
-
-    function maximizePane(paneId) {{
-      const pane = document.getElementById(paneId);
-      if (!pane) return;
-      if (pane.requestFullscreen) {{
-        pane.requestFullscreen();
-      }}
-    }}
-
-    function updateBrowserLink(url) {{
-      const link = document.getElementById('browser-link');
-      const frame = document.getElementById('browser-frame');
-      if (!url) {{
-        link.style.display = 'none';
-        return;
-      }}
-      link.style.display = 'block';
-      link.href = url;
-      link.textContent = 'Browser UI URL: ' + url;
-      if (frame.src !== url) {{
-        frame.src = url;
-      }}
-    }}
-
-    async function refreshJob() {{
-      if (!currentJobId) return;
-      const response = await fetch(`/api/jobs/${{currentJobId}}`);
-      if (!response.ok) return;
-      const data = await response.json();
-      document.getElementById('meta').textContent = `[${{data.status}}] ${{data.command}}`;
-      document.getElementById('output').textContent = data.output || '';
-      updateBrowserLink(data.browser_ui_url || '');
-      if (data.status !== 'running' && pollHandle) {{
-        clearInterval(pollHandle);
-        pollHandle = null;
-      }}
-    }}
-
-    async function refreshRuntimeStatus() {{
-      try {{
-        const response = await fetch('/api/runtime-status');
-        if (!response.ok) return;
-        const data = await response.json();
-        const ollamaNote = data.ollama_installed ? '' : ' | Ollama=missing (click Install Ollama)';
-        const heal = data.self_heal_healed ? 'recovered' : (data.self_heal_probe_ok ? 'ok' : 'failed');
-        const line = `Provider=${{data.provider_name}}:${{data.model_name}} | Health=${{data.provider_state}} | Budget=${{data.budget_status}} | Today=$${{Number(data.today_cost_usd || 0).toFixed(2)}}/${{Number(data.daily_limit_usd || 0).toFixed(2)}} | Queue=${{data.queue_depth}} | Heartbeat=${{data.heartbeat_age_seconds >= 0 ? data.heartbeat_age_seconds + 's' : 'unknown'}} | Heal=${{heal}}${{ollamaNote}}`;
-        document.getElementById('runtime-line').textContent = line;
-        const checks = [];
-        checks.push({{
-          label: 'Ollama installed',
-          ok: !!data.ollama_installed,
-          action: 'Click "One-Touch LLM Setup" in Environment.',
-        }});
-        checks.push({{
-          label: 'Primary provider usable',
-          ok: String(data.provider_state || 'unknown') === 'healthy',
-          action: 'Use Provider Onboarding + Test Primary Provider.',
-        }});
-        checks.push({{
-          label: 'Budget accepts new LLM tasks',
-          ok: String(data.budget_status || '').toUpperCase() !== 'BLOCKED',
-          action: 'Raise daily limit or wait for next UTC day.',
-        }});
-        checks.push({{
-          label: 'Heartbeat live',
-          ok: Number(data.heartbeat_age_seconds) >= 0 && Number(data.heartbeat_age_seconds) < 90,
-          action: 'Restart supervisor if heartbeat is stale.',
-        }});
-        const onboardingHtml = checks.map(item => {{
-          const klass = item.ok ? 'ok' : 'warn';
-          const status = item.ok ? 'OK' : 'ACTION NEEDED';
-          return `<div class="onboarding-item ${{klass}}"><strong>${{item.label}}:</strong> ${{status}}<br/><span style="color:var(--muted);">${{item.action}}</span></div>`;
-        }}).join('');
-        document.getElementById('onboarding-list').innerHTML = onboardingHtml;
-        const matrix = data.provider_matrix || {{}};
-        const cards = Object.keys(matrix).sort().map(name => {{
-          const row = matrix[name] || {{}};
-          const usable = !!row.usable;
-          const reason = row.reason ? ` | reason=${{row.reason}}` : '';
-          const model = row.model_name ? ` | model=${{row.model_name}}` : '';
-          const bg = usable ? '#e7f6ef' : '#fff3ea';
-          return `<div class="provider-card hover-card" title="enabled=${{!!row.enabled}}, configured=${{!!row.configured}}${{reason}}${{model}}" style="background:${{bg}};">
-            <strong>${{name}}</strong><br/>
-            <span style="font-size:12px;color:var(--muted);">enabled=${{!!row.enabled}} | configured=${{!!row.configured}} | usable=${{usable}}</span>
-          </div>`;
-        }}).join('');
-        document.getElementById('provider-cards').innerHTML = cards || '';
-      }} catch (e) {{
-        // keep previous UI state on transient fetch failure
-      }}
-    }}
-
-    async function refreshWizardState() {{
-      try {{
-        const response = await fetch('/api/wizard-state');
-        if (!response.ok) return;
-        const data = await response.json();
-        const steps = Array.isArray(data.steps) ? data.steps : [];
-        const summary = data.summary || {{}};
-        const html = steps.map(step => {{
-          const completed = !!step.completed;
-          const klass = completed ? 'ok' : 'warn';
-          const buttonLabel = completed ? 'Mark Pending' : 'Mark Done';
-          const stepIdEncoded = encodeURIComponent(String(step.step_id || ''));
-          return `<div class="wizard-item onboarding-item ${{klass}}">
-            <strong>${{step.label || step.step_id}}</strong><br/>
-            <span style="color:var(--muted);">${{completed ? 'Completed' : 'Pending'}}</span>
-            <div class="mini-actions">
-              <button class="secondary" onclick="setWizardStepFromEncoded('${{stepIdEncoded}}', ${{completed ? 'false' : 'true'}})">${{buttonLabel}}</button>
-            </div>
-          </div>`;
-        }}).join('');
-        document.getElementById('wizard-list').innerHTML = `<div class="wizard-item"><strong>Progress:</strong> ${{summary.completed || 0}} / ${{summary.total || 0}} (${{summary.progress_percent || 0}}%)</div>` + (html || '');
-      }} catch (e) {{
-        // ignore transient failures
-      }}
-    }}
-
-    async function setWizardStep(stepId, completed) {{
-      const response = await fetch('/api/wizard-state', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{step_id: stepId, completed}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Wizard update failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      await refreshWizardState();
-    }}
-
-    function setWizardStepFromEncoded(stepIdEncoded, completed) {{
-      const stepId = decodeURIComponent(String(stepIdEncoded || ''));
-      return setWizardStep(stepId, completed);
-    }}
-
-    async function refreshInbox() {{
-      try {{
-        const response = await fetch('/api/task-inbox');
-        if (!response.ok) return;
-        const data = await response.json();
-        const items = Array.isArray(data.items) ? data.items : [];
-        const html = items.map(item => {{
-          const intent = String(item.intent || '');
-          const safeIntent = encodeURIComponent(intent);
-          return `<div class="inbox-item">
-            <strong>${{item.item_id}}</strong> [${{item.priority}} | ${{item.status}}]<br/>
-            <span style="color:var(--muted);">${{intent}}</span>
-            <div class="mini-actions">
-              <button onclick="useInboxItemAsPromptEncoded('${{safeIntent}}')">Use As Prompt</button>
-              <button class="secondary" onclick="updateInboxItem('${{item.item_id}}', 'in_progress')">In Progress</button>
-              <button class="secondary" onclick="updateInboxItem('${{item.item_id}}', 'done')">Done</button>
-              <button class="secondary" onclick="deleteInboxItem('${{item.item_id}}')">Delete</button>
-            </div>
-          </div>`;
-        }}).join('');
-        document.getElementById('inbox-list').innerHTML = html || '<div class="inbox-item">No inbox items yet.</div>';
-      }} catch (e) {{
-        // ignore transient failures
-      }}
-    }}
-
-    function useInboxItemAsPrompt(intent) {{
-      document.getElementById('prompt').value = intent || '';
-      document.getElementById('meta').textContent = 'Planner prompt loaded from inbox item.';
-    }}
-
-    function useInboxItemAsPromptEncoded(intentEncoded) {{
-      const intent = decodeURIComponent(String(intentEncoded || ''));
-      useInboxItemAsPrompt(intent);
-    }}
-
-    async function addInboxItem() {{
-      const intent = (document.getElementById('inbox-intent').value || '').trim();
-      const priority = (document.getElementById('inbox-priority').value || 'normal').trim();
-      if (!intent) {{
-        document.getElementById('meta').textContent = 'Inbox intent is required.';
-        return;
-      }}
-      const response = await fetch('/api/task-inbox', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{action: 'add', intent, priority}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Inbox add failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      document.getElementById('inbox-intent').value = '';
-      await refreshInbox();
-    }}
-
-    async function updateInboxItem(itemId, status) {{
-      const response = await fetch('/api/task-inbox', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{action: 'update', item_id: itemId, status}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Inbox update failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      await refreshInbox();
-    }}
-
-    async function deleteInboxItem(itemId) {{
-      const response = await fetch('/api/task-inbox', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{action: 'delete', item_id: itemId}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Inbox delete failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      await refreshInbox();
-    }}
-
-    async function refreshSchedules() {{
-      try {{
-        const response = await fetch('/api/schedules');
-        if (!response.ok) return;
-        const data = await response.json();
-        const items = Array.isArray(data.items) ? data.items : [];
-        const html = items.map(item => {{
-          return `<div class="schedule-item">
-            <strong>${{item.schedule_id}}</strong> [${{item.enabled ? 'enabled' : 'disabled'}}]<br/>
-            <span style="color:var(--muted);">${{item.intent}}</span><br/>
-            <span style="color:var(--muted);">every ${{item.interval_minutes}} min | next=${{item.next_run_at || 'n/a'}}</span>
-            <div class="mini-actions">
-              <button class="secondary" onclick="toggleSchedule('${{item.schedule_id}}', ${{item.enabled ? 'false' : 'true'}})">${{item.enabled ? 'Disable' : 'Enable'}}</button>
-              <button class="secondary" onclick="deleteSchedule('${{item.schedule_id}}')">Delete</button>
-            </div>
-          </div>`;
-        }}).join('');
-        document.getElementById('schedule-list').innerHTML = html || '<div class="schedule-item">No schedules yet.</div>';
-      }} catch (e) {{
-        // ignore transient failures
-      }}
-    }}
-
-    async function createSchedule() {{
-      const intent = (document.getElementById('schedule-intent').value || '').trim();
-      const intervalRaw = (document.getElementById('schedule-interval').value || '').trim();
-      const intervalMinutes = Number(intervalRaw);
-      if (!intent) {{
-        document.getElementById('meta').textContent = 'Schedule intent is required.';
-        return;
-      }}
-      if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {{
-        document.getElementById('meta').textContent = 'Schedule interval must be > 0 minutes.';
-        return;
-      }}
-      const response = await fetch('/api/schedules', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{
-          action: 'create',
-          intent,
-          interval_minutes: Math.floor(intervalMinutes),
-          agent_id: document.getElementById('agent').value || 'default'
-        }})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Schedule create failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      document.getElementById('schedule-intent').value = '';
-      await refreshSchedules();
-      await refreshInbox();
-    }}
-
-    async function toggleSchedule(scheduleId, enabled) {{
-      const response = await fetch('/api/schedules', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{action: 'toggle', schedule_id: scheduleId, enabled}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Schedule update failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      await refreshSchedules();
-    }}
-
-    async function deleteSchedule(scheduleId) {{
-      const response = await fetch('/api/schedules', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{action: 'delete', schedule_id: scheduleId}})
-      }});
-      const data = await response.json();
-      if (!response.ok) {{
-        document.getElementById('meta').textContent = 'Schedule delete failed: ' + (data.error || 'unknown error');
-        return;
-      }}
-      await refreshSchedules();
-    }}
-
-    async function refreshTraces() {{
-      try {{
-        const response = await fetch('/api/traces');
-        if (!response.ok) return;
-        const data = await response.json();
-        const filter = document.getElementById('trace-filter').value || 'all';
-        const allItems = Array.isArray(data.items) ? data.items : [];
-        const items = filter === 'all'
-          ? allItems
-          : allItems.filter(item => (item && item.type) === filter);
-        const select = document.getElementById('trace-select');
-        if (!items.length) {{
-          select.innerHTML = '<option value="">No traces for selected filter</option>';
-          document.getElementById('trace-output').textContent = 'No traces for selected filter.';
-          return;
-        }}
-        const previous = select.value;
-        select.innerHTML = items.map(item => {{
-          const label = `${{item.trace_id}} | ${{item.type}} | stages=${{item.stage_count}} | last=${{item.last_event}}`;
-          const selected = (previous && previous === item.trace_id) || (!previous && item === items[0]);
-          return `<option value="${{item.trace_id}}" ${{selected ? 'selected' : ''}}>${{label}}</option>`;
-        }}).join('');
-        await loadSelectedTrace();
-      }} catch (e) {{
-        // keep existing trace view on fetch failures
-      }}
-    }}
-
-    async function loadSelectedTrace() {{
-      const select = document.getElementById('trace-select');
-      const traceId = select.value;
-      if (!traceId) return;
-      try {{
-        const response = await fetch(`/api/traces/${{encodeURIComponent(traceId)}}`);
-        if (!response.ok) {{
-          document.getElementById('trace-output').textContent = 'Failed to load trace details.';
-          return;
-        }}
-        const trace = await response.json();
-        renderTraceSummary(trace);
-        document.getElementById('trace-output').textContent = JSON.stringify(trace, null, 2);
-      }} catch (e) {{
-        document.getElementById('trace-summary').textContent = 'Failed to load trace summary.';
-        document.getElementById('trace-output').textContent = 'Failed to load trace details.';
-      }}
-    }}
-
-    function renderTraceSummary(trace) {{
-      if (!trace || typeof trace !== 'object') {{
-        document.getElementById('trace-summary').textContent = 'Trace summary unavailable.';
-        return;
-      }}
-      const stages = Array.isArray(trace.stages) ? trace.stages : [];
-      const lines = [
-        `Trace: ${{trace.trace_id || 'unknown'}}`,
-        `Type: ${{trace.type || 'unknown'}}`,
-        `Stages: ${{stages.length}}`,
-        '',
-      ];
-      for (const stage of stages) {{
-        if (!stage || typeof stage !== 'object') continue;
-        const event = stage.event || 'stage';
-        const at = stage.at || '';
-        lines.push(`- ${{event}}${{at ? ' @ ' + at : ''}}`);
-      }}
-      document.getElementById('trace-summary').textContent = lines.join('\\n');
-    }}
-
-    async function exportSelectedTrace() {{
-      const select = document.getElementById('trace-select');
-      const traceId = select.value;
-      if (!traceId) return;
-      try {{
-        const response = await fetch(`/api/traces/${{encodeURIComponent(traceId)}}`);
-        if (!response.ok) {{
-          document.getElementById('meta').textContent = 'Trace export failed.';
-          return;
-        }}
-        const trace = await response.json();
-        const blob = new Blob([JSON.stringify(trace, null, 2)], {{ type: 'application/json' }});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${{traceId}}.json`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        document.getElementById('meta').textContent = `Trace exported: ${{traceId}}.json`;
-      }} catch (e) {{
-        document.getElementById('meta').textContent = 'Trace export failed.';
-      }}
-    }}
-
-    async function exportSupportBundle() {{
-      const agentId = document.getElementById('agent').value || 'default';
-      try {{
-        const response = await fetch(`/api/support-bundle?agent_id=${{encodeURIComponent(agentId)}}`);
-        if (!response.ok) {{
-          document.getElementById('meta').textContent = 'Support bundle export failed.';
-          return;
-        }}
-        const bundle = await response.json();
-        const ts = (bundle.generated_at || '').replace(/[:]/g, '-');
-        const filename = `borisbot-support-${{agentId}}-${{ts || 'latest'}}.json`;
-        const blob = new Blob([JSON.stringify(bundle, null, 2)], {{ type: 'application/json' }});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        document.getElementById('meta').textContent = `Support bundle exported: ${{filename}}`;
-      }} catch (e) {{
-        document.getElementById('meta').textContent = 'Support bundle export failed.';
-      }}
-    }}
-
-    setViewMode('split');
-    try {{
-      const storedMode = window.localStorage.getItem('borisbot_guide_mode');
-      setGuideMode(storedMode || 'simple');
-    }} catch (e) {{
-      setGuideMode('simple');
-    }}
-    applyWizardPage(0);
-    loadProfile();
-    syncRecommendedModelFromInput();
-    showOllamaSetupPlan();
-    refreshPermissions();
-    refreshRuntimeStatus();
-    refreshWizardState();
-    refreshInbox();
-    refreshSchedules();
-    refreshTraces();
-    loadChatHistory();
-    refreshCostEstimator();
-    document.getElementById('prompt').addEventListener('input', refreshCostEstimator);
-    document.getElementById('assistant-input').addEventListener('input', refreshCostEstimator);
-    document.getElementById('primary_provider').addEventListener('input', refreshCostEstimator);
-    document.getElementById('model').addEventListener('input', () => {{
-      syncRecommendedModelFromInput();
-      showOllamaSetupPlan();
-      refreshCostEstimator();
-    }});
-    setInterval(refreshRuntimeStatus, 5000);
-    setInterval(refreshWizardState, 15000);
-    setInterval(refreshInbox, 15000);
-    setInterval(refreshSchedules, 15000);
-    setInterval(refreshTraces, 5000);
-    setInterval(refreshCostEstimator, 30000);
-  </script>
-</body>
-</html>
-"""
-
-
-def run_guide_server(
-    workspace: Path,
-    host: str = "127.0.0.1",
-    port: int = 7788,
-    open_browser: bool = True,
-) -> None:
-    """Run the guided web server until interrupted."""
-    state = GuideState(workspace=workspace, python_bin=sys.executable)
-    handler = _make_handler(state)
-    server = ThreadingHTTPServer((host, port), handler)
-    url = f"http://{host}:{port}"
-    print(f"BorisBot guide available at: {url}")
-    print("Press Ctrl+C to stop the guide server.")
-    if open_browser:
-        webbrowser.open(url)
+def _resolve_model_for_provider(provider: str, model: str) -> str:
+    if model: return model
+    
+    # Try to load from profile
     try:
-        server.serve_forever()
+        profile = load_profile()
+        settings = profile.get("provider_settings", {})
+        provider_settings = settings.get(provider, {})
+        if provider_settings.get("model_name"):
+            return str(provider_settings["model_name"])
+    except Exception:
+        pass
+
+    if provider == "ollama": return "llama3.2:3b"
+    if provider == "openai": return "gpt-4o"
+    if provider == "anthropic": return "claude-3-5-sonnet-latest"
+    return "default"
+
+
+def _extract_handoff_intent_from_assistant_trace(trace: dict) -> str:
+    if trace.get("type") != "assistant_chat":
+        raise ValueError("Trace is not an assistant_chat")
+    
+    stages = trace.get("stages", [])
+    for stage in stages:
+         data = stage.get("data", {})
+         if isinstance(data, dict):
+             # check helper response
+             response = data.get("response", {})
+             if isinstance(response, dict) and response.get("message"):
+                 return str(response["message"])
+    return "unknown"
+
+
+def _trace_already_executed(trace: dict) -> bool:
+    stages = trace.get("stages", [])
+    for stage in stages:
+        if stage.get("event") == "approved_execute_submitted":
+            return True
+    return False
+
+
+def _enforce_execute_permissions(agent_id: str, preview: dict, approve_permission: bool = False) -> dict | None:
+    # 1. Check if the preview already specifies required permissions (planner analysis)
+    required_permissions = preview.get("required_permissions", [])
+    if required_permissions:
+        for req in required_permissions:
+            tool = req.get("tool_name")
+            if not tool:
+                continue
+            
+            # We re-check the live permission status, as the plan might be stale
+            decision = get_agent_tool_permission_sync(agent_id, tool)
+            
+            if decision == DECISION_DENY:
+                return {
+                    "error": "permission_denied",
+                    "agent_id": agent_id,
+                    "tool_name": tool,
+                    "message": f"Tool '{tool}' is denied for agent '{agent_id}'.",
+                }
+            
+            if decision == DECISION_PROMPT:
+                if approve_permission:
+                    set_agent_tool_permission_sync(agent_id, tool, DECISION_ALLOW)
+                else:
+                    return {
+                        "error": "permission_required",
+                        "agent_id": agent_id,
+                        "tool_name": tool,
+                        "message": f"Agent '{agent_id}' requires approval for tool '{tool}'.",
+                    }
+        return None
+
+    # 2. If no explicit permissions in preview, fallback to scanning commands
+    validated_commands = preview.get("validated_commands", [])
+    required_tools = set()
+    for cmd in validated_commands:
+        action = cmd.get("action")
+        tool = required_tool_for_action(action)
+        if tool:
+            required_tools.add(tool)
+
+    # 3. If still no tools found, default to browser (legacy behavior / safety net)
+    if not required_tools:
+         required_tools.add(TOOL_BROWSER)
+
+    for tool in required_tools:
+        decision = get_agent_tool_permission_sync(agent_id, tool)
+        if decision == DECISION_DENY:
+            return {
+                "error": "permission_denied",
+                "agent_id": agent_id,
+                "tool_name": tool,
+                "message": f"Tool '{tool}' is denied for agent '{agent_id}'.",
+            }
+        
+        if decision == DECISION_PROMPT:
+            if approve_permission:
+                set_agent_tool_permission_sync(agent_id, tool, DECISION_ALLOW)
+            else:
+                return {
+                    "error": "permission_required",
+                    "agent_id": agent_id,
+                    "tool_name": tool,
+                    "message": f"Agent '{agent_id}' requires approval for tool '{tool}'.",
+                }
+
+    return None
+
+
+def run_guide_server(workspace: Path, host: str = "127.0.0.1", port: int = 7788, open_browser: bool = True) -> None:
+    state = GuideState(workspace, python_bin=sys.executable)
+    
+    # Start background scheduler
+    def _scheduler_loop() -> None:
+        while True:
+            try:
+                state.tick_schedules()
+            except Exception:
+                pass
+            time.sleep(10)
+    
+    t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
+    
+    httpd = ThreadingHTTPServer((host, port), _make_handler(state))
+    print(f"BorisBot guide available at: http://{host}:{port}")
+    print("Press Ctrl+C to stop the guide server.")
+
+    # Start ActionRunner
+    runner = ActionRunner(state)
+    runner.start()
+
+    try:
+        if open_browser:
+            webbrowser.open(f"http://{host}:{port}")
+        httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        runner.stop()
+        httpd.server_close()
 
 
-def _collect_runtime_status(python_bin: str) -> dict:
-    """Collect runtime status for GUI without requiring CLI invocation."""
-    profile = load_profile()
-    model_name = str(profile.get("model_name", os.getenv("BORISBOT_OLLAMA_MODEL", "llama3.2:3b")))
-    provider_name = str(profile.get("primary_provider", "ollama"))
-    provider_state = "unknown"
-    budget_status = "ok"
-    today_cost = 0.0
-    daily_limit = 0.0
-    daily_remaining = 0.0
-    session_tokens = 0
-    session_cost = 0.0
-    active_tasks = 0
-    queue_depth = 0
-    heartbeat_age = -1
-    self_heal_probe_ok = False
-    self_heal_healed = False
-    ollama_installed = shutil.which("ollama") is not None
-    provider_matrix: dict[str, dict[str, object]] = {}
+class ActionRunner(threading.Thread):
+    def __init__(self, state: GuideState):
+        super().__init__(daemon=True)
+        self.state = state
+        self._stop_event = threading.Event()
 
-    try:
-        response = httpx.get("http://127.0.0.1:7777/metrics/providers", timeout=1.5)
-        payload = response.json() if response.status_code == 200 else {}
-        if isinstance(payload, dict):
-            row = payload.get(provider_name, {})
-            if isinstance(row, dict):
-                provider_state = str(row.get("state", provider_state))
-    except Exception:
-        row = get_provider_health_registry().get_snapshot().get(provider_name, {})
-        if isinstance(row, dict):
-            provider_state = str(row.get("state", provider_state))
+    def stop(self):
+        self._stop_event.set()
 
-    try:
-        budget = asyncio.run(CostGuard().get_budget_status("default"))
-        budget_status = str(budget.get("status", "ok")).upper()
-        today_cost = float(budget.get("daily_spend", 0.0))
-        daily_limit = float(budget.get("daily_limit", 0.0))
-        daily_remaining = float(budget.get("daily_remaining", 0.0))
-    except Exception:
-        pass
-
-    try:
-        cost_guard = CostGuard()
-        session_start = asyncio.run(cost_guard.get_runtime_session_started_at())
-        usage = asyncio.run(cost_guard.get_usage_window(start_iso=session_start))
-        session_tokens = int(usage.get("total_tokens", 0))
-        session_cost = float(usage.get("cost_usd", 0.0))
-    except Exception:
-        pass
-
-    async def _task_counts() -> tuple[int, int]:
-        async for db in get_db():
-            cursor = await db.execute("SELECT COUNT(*) AS count FROM tasks WHERE status = 'running'")
-            row = await cursor.fetchone()
-            running = int(row["count"] if row else 0)
-            cursor = await db.execute("SELECT COUNT(*) AS count FROM task_queue")
-            row = await cursor.fetchone()
-            depth = int(row["count"] if row else 0)
-            return running, depth
-        return 0, 0
-
-    try:
-        active_tasks, queue_depth = asyncio.run(_task_counts())
-    except Exception:
-        pass
-
-    heartbeat = read_heartbeat_snapshot()
-    if isinstance(heartbeat, dict):
-        ts = heartbeat.get("timestamp")
-        if isinstance(ts, str):
+    def run(self):
+        while not self._stop_event.is_set():
             try:
-                heartbeat_age = int((datetime.utcnow() - datetime.fromisoformat(ts)).total_seconds())
+                self._tick()
+            except Exception as e:
+                print(f"[ActionRunner] Error: {e}")
+            time.sleep(2)
+
+    def _tick(self):
+        item = self.state.get_next_pending_item()
+        if not item:
+            return
+        
+        item_id = item["item_id"]
+        intent = item["intent"]
+        self.state.update_inbox_item(item_id, "in_progress")
+
+        try:
+            # 1. Defaults
+            provider = "ollama"
+            model = "llama3.2:3b"
+            try:
+                profile = load_profile()
+                settings = profile.get("provider_settings", {})
+                # Use configured primary provider
+                configured_chain = profile.get("provider_chain", [])
+                if configured_chain and isinstance(configured_chain, list):
+                     provider = configured_chain[0]
+                
+                # Use configured model for that provider
+                provider_config = settings.get(provider, {})
+                if provider_config.get("model_name"):
+                    model = provider_config.get("model_name")
             except Exception:
-                heartbeat_age = -1
-        self_heal_probe_ok = bool(heartbeat.get("self_heal_probe_ok", False))
-        self_heal_healed = bool(heartbeat.get("self_heal_healed", False))
+                pass
 
-    provider_settings = profile.get("provider_settings", {})
-    secret_status = get_secret_status()
-    for provider in ["ollama", "openai", "anthropic", "google", "azure"]:
-        settings = provider_settings.get(provider, {}) if isinstance(provider_settings, dict) else {}
-        enabled = bool(settings.get("enabled", provider == "ollama")) if isinstance(settings, dict) else (provider == "ollama")
-        model = str(settings.get("model_name", "")).strip() if isinstance(settings, dict) else ""
-        if provider == "ollama":
-            configured = ollama_installed
-            usable = enabled and ollama_installed
-            reason = "" if usable else "ollama_not_installed"
-        elif provider in {"azure"}:
-            configured = bool(secret_status.get(provider, {}).get("configured", False))
-            endpoint_ok = bool(os.getenv("BORISBOT_AZURE_OPENAI_ENDPOINT", "").strip())
-            usable = enabled and configured and endpoint_ok
-            if not enabled:
-                reason = "disabled"
-            elif not configured:
-                reason = "api_key_missing"
-            elif not endpoint_ok:
-                reason = "azure_endpoint_missing"
-            else:
-                reason = ""
-        else:
-            configured = bool(secret_status.get(provider, {}).get("configured", False))
-            usable = enabled and configured
-            reason = "" if usable else ("api_key_missing" if enabled else "disabled")
-        provider_matrix[provider] = {
-            "enabled": enabled,
-            "configured": configured,
-            "usable": usable,
-            "reason": reason,
-            "model_name": model,
-        }
+            # 2. Plan
+            preview = _build_dry_run_preview(
+                intent,
+                agent_id="default",
+                model_name=model,
+                provider_name=provider,
+            )
+            
+            if preview["status"] != "ok":
+                raise ValueError(preview.get('message', 'unknown error'))
 
-    return {
-        "provider_name": provider_name,
-        "provider_state": provider_state,
-        "provider_matrix": provider_matrix,
-        "model_name": model_name,
-        "session_tokens": session_tokens,
-        "session_cost_usd": session_cost,
-        "today_cost_usd": today_cost,
-        "daily_limit_usd": daily_limit,
-        "daily_remaining_usd": daily_remaining,
-        "budget_status": budget_status,
-        "active_tasks": active_tasks,
-        "queue_depth": queue_depth,
-        "heartbeat_age_seconds": heartbeat_age,
-        "self_heal_probe_ok": self_heal_probe_ok,
-        "self_heal_healed": self_heal_healed,
-        "ollama_installed": ollama_installed,
-    }
+            # 3. Trace
+            trace = self.state.add_plan_trace(
+                 agent_id="default",
+                 model_name=model,
+                 intent=intent,
+                 preview=preview,
+            )
+
+            # 4. Workflow
+            validated_commands = preview.get("validated_commands", [])
+            generated_dir = self.state.workspace / "workflows" / "generated"
+            generated_dir.mkdir(parents=True, exist_ok=True)
+            task_id = f"inbox_{item_id}_{int(time.time())}"
+            workflow_path = generated_dir / f"{task_id}.json"
+            
+            workflow_payload = {
+                "schema_version": "task_command.v1",
+                "task_id": task_id,
+                "commands": validated_commands,
+            }
+            workflow_path.write_text(json.dumps(workflow_payload, indent=2), encoding="utf-8")
+            
+            self.state.append_trace_stage(
+                trace["trace_id"],
+                {
+                    "event": "approved_execute_requested",
+                    "task_id": task_id,
+                    "workflow_path": str(workflow_path),
+                },
+            )
+
+            # 5. Execute (Replay)
+            job = self.state.create_job("replay", {"workflow_path": str(workflow_path)})
+            
+            self.state.append_trace_stage(
+                trace["trace_id"],
+                {
+                    "event": "approved_execute_submitted",
+                    "job_id": job.job_id,
+                    "task_id": task_id,
+                },
+            )
+            
+            # Optimistic completion of "scheduling"
+            self.state.update_inbox_item(item_id, "done")
+
+        except Exception as e:
+            print(f"[ActionRunner] Task failed: {e}")
+            self.state.update_inbox_item(item_id, "failed")
+
+
+if __name__ == "__main__":
+    run_guide_server(Path.cwd())
+
