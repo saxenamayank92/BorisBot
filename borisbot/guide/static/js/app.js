@@ -239,6 +239,37 @@ const Wizard = {
         } catch (e) { }
     },
 
+    async runOllamaAction(action) {
+        const log = document.getElementById('ollama-setup-log');
+        if (!log) return;
+        log.textContent = `Starting ${action}...\n`;
+        try {
+            const res = await API.post('/api/run', {
+                action,
+                params: {},
+                approve_permission: true
+            });
+            const jobId = res.job_id;
+            const poll = setInterval(async () => {
+                try {
+                    const job = await API.get(`/api/jobs/${jobId}`);
+                    log.textContent = job.output || `Status: ${job.status}`;
+                    log.scrollTop = log.scrollHeight;
+                    if (job.status !== 'running') {
+                        clearInterval(poll);
+                        await this.checkProviderStatus();
+                        await this.loadRecommendedModels();
+                    }
+                } catch (err) {
+                    clearInterval(poll);
+                    log.textContent += `\nPolling failed: ${err.message}`;
+                }
+            }, 1000);
+        } catch (e) {
+            log.textContent += `Failed to start action: ${e.message}`;
+        }
+    },
+
     async saveVerifyAgent() {
         const log = document.getElementById('verification-log');
         log.innerHTML = 'Starting verification...\n';
