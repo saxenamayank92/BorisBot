@@ -766,6 +766,27 @@ class GuideServerCommandTests(unittest.TestCase):
         self.assertEqual(dead[0]["source_type"], "schedule")
         self.assertFalse(bool(state._schedules[0]["enabled"]))
 
+    def test_retry_dead_letter_reenables_schedule(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        sched = state.create_schedule("Daily report", 1, agent_id="default")
+        state._schedules[0]["interval_minutes"] = "oops"
+        state._schedules[0]["next_run_at"] = "2000-01-01T00:00:00"
+        state._schedules[0]["max_retries"] = 1
+        state.tick_schedules()
+        dead = state.list_dead_letters()
+        self.assertTrue(dead)
+        updated = state.retry_dead_letter(dead[0]["dead_letter_id"])
+        self.assertEqual(updated["schedule_id"], sched["schedule_id"])
+        self.assertTrue(bool(updated["enabled"]))
+        self.assertFalse(bool(updated["dead_letter"]))
+        self.assertEqual(updated["failure_count"], 0)
+        self.assertFalse(state.list_dead_letters())
+
+    def test_retry_dead_letter_not_found(self) -> None:
+        state = GuideState(workspace=Path.cwd(), python_bin=sys.executable)
+        with self.assertRaisesRegex(ValueError, "dead letter not found"):
+            state.retry_dead_letter("dlq_99999")
+
     def test_record_artifact_writes_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state = GuideState(workspace=Path(tmpdir), python_bin=sys.executable)

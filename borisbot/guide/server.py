@@ -1592,7 +1592,13 @@ class GuideState:
                     break
             if not isinstance(schedule, dict):
                 raise ValueError("schedule not found for dead letter")
-            interval = int(schedule.get("interval_minutes", 1))
+            try:
+                interval = int(schedule.get("interval_minutes", 1))
+            except Exception:
+                interval = 1
+            if interval <= 0:
+                interval = 1
+            schedule["interval_minutes"] = interval
             schedule["enabled"] = True
             schedule["dead_letter"] = False
             schedule["failure_count"] = 0
