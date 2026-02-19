@@ -254,6 +254,21 @@
                             </div>
                             <pre id="auto-trace-output" class="terminal" style="height:220px;">No traces loaded.</pre>
                         </div>
+                        <div class="card" style="margin-top: 16px;">
+                            <h2 style="font-size:22px;">Scheduler + Recovery</h2>
+                            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+                                <button class="btn-secondary btn-small" onclick="Dashboard.loadSchedules()">Schedules</button>
+                                <button class="btn-secondary btn-small" onclick="Dashboard.loadDeadLetters()">Dead Letters</button>
+                                <button class="btn-secondary btn-small" onclick="Dashboard.loadArtifacts()">Artifacts</button>
+                            </div>
+                            <pre id="auto-schedules-output" class="terminal" style="height:140px;">No schedule data loaded.</pre>
+                            <pre id="auto-deadletters-output" class="terminal" style="height:140px;">No dead letters loaded.</pre>
+                            <div style="display:flex;gap:8px;margin:8px 0;">
+                                <input id="auto-deadletter-id" type="text" placeholder="dead letter id (e.g. dlq_00001)" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;">
+                                <button class="btn-secondary btn-small" onclick="Dashboard.retryDeadLetter()">Retry Dead Letter</button>
+                            </div>
+                            <pre id="auto-artifacts-output" class="terminal" style="height:180px;">No artifacts loaded.</pre>
+                        </div>
                     </div>
 
                     <!-- Chat Overlay / Panel (Simple implementation for now) -->

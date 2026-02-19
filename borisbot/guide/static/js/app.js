@@ -291,11 +291,16 @@ const Dashboard = {
         this.loadWorkflows();
         this.loadPermissions();
         this.loadTraces();
+        this.loadSchedules();
+        this.loadDeadLetters();
+        this.loadArtifacts();
         this.refreshRuntime();
         // Poll for updates
         setInterval(() => this.renderInbox(), 5000);
         setInterval(() => this.pollJob(), 1000);
         setInterval(() => this.refreshRuntime(), 5000);
+        setInterval(() => this.loadDeadLetters(), 10000);
+        setInterval(() => this.loadArtifacts(), 10000);
 
         // Navigation bindings
         document.querySelectorAll('.nav-item').forEach(el => {
@@ -447,6 +452,55 @@ const Dashboard = {
             out.textContent = JSON.stringify(trace, null, 2);
         } catch (e) {
             out.textContent = 'Trace load failed: ' + e.message;
+        }
+    },
+
+    async loadSchedules() {
+        const out = document.getElementById('auto-schedules-output');
+        if (!out) return;
+        try {
+            const data = await API.get('/api/schedules');
+            out.textContent = JSON.stringify(data.items || [], null, 2);
+        } catch (e) {
+            out.textContent = 'Schedule load failed: ' + e.message;
+        }
+    },
+
+    async loadDeadLetters() {
+        const out = document.getElementById('auto-deadletters-output');
+        if (!out) return;
+        try {
+            const data = await API.get('/api/dead-letters');
+            out.textContent = JSON.stringify(data.items || [], null, 2);
+        } catch (e) {
+            out.textContent = 'Dead-letter load failed: ' + e.message;
+        }
+    },
+
+    async retryDeadLetter() {
+        const id = (document.getElementById('auto-deadletter-id')?.value || '').trim();
+        const out = document.getElementById('auto-deadletters-output');
+        if (!id) {
+            if (out) out.textContent = 'Provide a dead_letter_id to retry.';
+            return;
+        }
+        try {
+            const payload = await API.post('/api/dead-letters', { action: 'retry', dead_letter_id: id });
+            if (out) out.textContent = JSON.stringify(payload.dead_letters || [], null, 2);
+            await this.loadSchedules();
+        } catch (e) {
+            if (out) out.textContent = 'Retry failed: ' + e.message;
+        }
+    },
+
+    async loadArtifacts() {
+        const out = document.getElementById('auto-artifacts-output');
+        if (!out) return;
+        try {
+            const data = await API.get('/api/artifacts');
+            out.textContent = JSON.stringify(data.items || [], null, 2);
+        } catch (e) {
+            out.textContent = 'Artifact load failed: ' + e.message;
         }
     },
 
