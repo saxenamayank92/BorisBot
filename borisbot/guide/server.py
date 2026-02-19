@@ -2582,11 +2582,11 @@ def _render_html(workflows: list[str]) -> str:
         <label for="workflow">Workflow file</label>
         <select id="workflow">{options}</select>
         <div class="wizard-nav">
-          <button class="secondary" id="wizard-back" onclick="prevWizardPage()">Back</button>
-          <button id="wizard-next" onclick="nextWizardPage()">Next</button>
+          <button type="button" class="secondary" id="wizard-back" onclick="prevWizardPage()">Back</button>
+          <button type="button" id="wizard-next" onclick="nextWizardPage()">Next</button>
           <span class="wizard-progress" id="wizard-progress">Step 1/1</span>
         </div>
-        <div class="wizard-page" data-page-title="Setup">
+        <div class="wizard-page" id="wizard-page-setup" data-page-title="Setup">
         <div class="step start-here">
           <h3>Start Here</h3>
           <p>Follow these steps in order. Keep <strong>Simple Onboarding</strong> mode on for first run.</p>
@@ -2628,7 +2628,7 @@ def _render_html(workflows: list[str]) -> str:
           <option value="mistral:7b">Higher quality: mistral:7b</option>
         </select>
         </div>
-        <div class="wizard-page" data-page-title="Validate">
+        <div class="wizard-page" id="wizard-page-validate" data-page-title="Validate">
         <label for="budget_system_daily" class="advanced-control">System daily budget (USD)</label>
         <input id="budget_system_daily" class="advanced-control" value="" placeholder="e.g. 10" />
         <label for="budget_agent_daily" class="advanced-control">Agent daily budget (USD)</label>
@@ -2746,7 +2746,7 @@ def _render_html(workflows: list[str]) -> str:
         </div>
         </div>
 
-        <div class="wizard-page advanced-step" data-page-title="Advanced Workspace">
+        <div class="wizard-page advanced-step" id="wizard-page-advanced" data-page-title="Advanced Workspace">
         <div class="step advanced-step">
           <h3>Task Inbox</h3>
           <p>Capture recurring intents and route them into planner flow.</p>
@@ -2845,13 +2845,19 @@ def _render_html(workflows: list[str]) -> str:
     let guideMode = 'simple';
     let wizardPageIndex = 0;
 
-    function visibleWizardPages() {{
-      const pages = Array.from(document.querySelectorAll('.wizard-page'));
-      return pages.filter(node => !node.classList.contains('hidden'));
+    function wizardPageOrder() {{
+      const order = ['wizard-page-setup', 'wizard-page-validate'];
+      if (guideMode === 'full') {{
+        order.push('wizard-page-advanced');
+      }}
+      return order;
     }}
 
     function applyWizardPage(nextIndex) {{
-      const pages = visibleWizardPages();
+      const pageIds = wizardPageOrder();
+      const pages = pageIds
+        .map(pageId => document.getElementById(pageId))
+        .filter(Boolean);
       if (!pages.length) {{
         document.getElementById('wizard-progress').textContent = 'Step 0/0';
         return;
@@ -2859,9 +2865,11 @@ def _render_html(workflows: list[str]) -> str:
       wizardPageIndex = Math.max(0, Math.min(nextIndex, pages.length - 1));
       for (const page of document.querySelectorAll('.wizard-page')) {{
         page.classList.remove('active');
+        page.style.display = 'none';
       }}
       const active = pages[wizardPageIndex];
       active.classList.add('active');
+      active.style.display = 'block';
       const title = active.getAttribute('data-page-title') || `Step ${{wizardPageIndex + 1}}`;
       document.getElementById('wizard-progress').textContent = `Step ${{wizardPageIndex + 1}}/${{pages.length}}: ${{title}}`;
       const backBtn = document.getElementById('wizard-back');
